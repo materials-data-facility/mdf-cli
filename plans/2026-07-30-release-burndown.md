@@ -6,6 +6,8 @@ Synthesized from a four-agent audit of the three repos (frontend `mdf-next2` @ `
 
 Legend: **P0** = blocks release · **P1** = fix before or at cutover · **P2** = fast-follow. `[S/M/L]` = rough effort.
 
+> **Status 2026-07-30 (end of wave 3)** — completed and committed: D-1, D-2, D-3, D-4, D-5, D-6, D-7, D-8, D-10, D-11, B-1, B-2, B-3, B-4, B-6, B-7, B-8, F-5 (CI added; ESLint 9 setup still a follow-up), C-2. Skipped per maintainer: B-5 (test credential). See `2026-07-30-wave-report.md` for the full change report. Next up: phase 5 (environment truth: O-5, F-2, F-3, C-1, C-8, O-6) and phase 6 (release mechanics).
+
 ---
 
 ## Workstream D — The sync (the release centerpiece; currently 4 manual scripts, no service)
@@ -48,6 +50,8 @@ Current state: extract → convert → ingest → reconcile in `connect_server/a
 - [ ] **B-18 (P1) [M]** *(added 2026-07-30)* Delete/withdraw never reconcile the search index: deleting the only published version leaves a stale public entry; deleting the newest should re-ingest the highest remaining published version. Needs delete_entry/re-ingest logic in the delete and withdraw paths.
 - [ ] **B-19 (P2) [S]** *(added 2026-07-30)* DataCite mint failure only logs a warning and publish proceeds without a DOI — decide whether DOI is a publish precondition like search ingest now is.
 - [ ] **B-20 (P2) [S]** *(added 2026-07-30)* Version records created by curator metadata-edits carry the curator's `user_id`, so `/submissions` listings attribute them to the curator (authz is safe — ownership reads the root version — but attribution is misleading). Consider an immutable `owner_id` field.
+- [ ] **D-16 (P2) [S]** *(added 2026-07-30, wave-2 re-review residual)* `previous_version` is batch-relative (set by convert only when the prior version is in the same batch) and still in the sync hash input, so a single-version delta batch classifies as `updated` and the merge drops `previous_version`/clobbers `root_version` on the stored record. Exclude it from the hash and preserve/derive chain links from the store on update.
+- [ ] **D-17 (P2) [S]** *(added 2026-07-30)* The `search_synced_hash` stamp is a get-then-upsert of the whole record; a concurrent app write between the two is lost on DynamoDB. Use a two-attribute `update_item` instead.
 - [ ] **D-15 (P2) [S]** *(added 2026-07-30)* `sync_content_hash` persistence relies on a compatibility path inside the ingest script because `SqliteSubmissionStore` has a fixed column list; add first-class support in `store.py` (both backends) so the hash round-trips natively.
 - [ ] **B-15 (P2) [S]** Bundle hygiene: `CodeUri: .` ships all of v1, the test suites, and demo scripts in the Lambda package (`template.yaml:205,302`); add `.samignore`. `MANUAL_TEST.md` dev-auth steps can't pass under staging's `AuthMode=production` — rewrite with real tokens. Full-table scans in `search.py:505-548` / `admin.py:35,75` fine at ~900 datasets, won't scale — note a threshold.
 
