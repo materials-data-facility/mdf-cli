@@ -318,7 +318,7 @@ repository.
 
 ```bash
 # Client tests
-python -m pytest tests/ -v --ignore=tests/test_connect_client.py
+python -m pytest tests/ -v
 
 # Backend tests are run from the sibling connect_server repository.
 ```

@@ -30,4 +30,4 @@ jobs:
 
       - name: Test with pytest
         run: |
-          pytest tests/ -v --ignore=tests/test_connect_client.py
+          pytest tests/ -v

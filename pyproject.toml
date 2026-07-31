@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mdf_agent"
-version = "0.2.0"
+name = "mdf-agent"
+dynamic = ["version"]
 description = "Modern MDF Connect client with CLI, Python API, and Claude skill integration."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
   { name = "Materials Data Facility" }
 ]
@@ -17,7 +18,6 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
-  "License :: OSI Approved :: MIT License",
 ]
 
 dependencies = [
@@ -40,8 +40,15 @@ extractors = [
 [project.scripts]
 mdf = "mdf_agent.cli.main:app"
 
+[project.urls]
+Homepage = "https://materialsdatafacility.org"
+Repository = "https://github.com/materials-data-facility/connect_client"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = {attr = "mdf_agent.version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

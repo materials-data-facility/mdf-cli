@@ -8,6 +8,7 @@ Untitled*.ipynb
 .idea
 *.cache*
 *pytest_cache*
+*.egg-info/
 
 *temp/*
 
@@ -18,3 +19,5 @@ Untitled*.ipynb
 travis.tar
 .coverage
 .DS_Store
+datasets.json
+converted_datasets.json
