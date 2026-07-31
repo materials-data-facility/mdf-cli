@@ -6,9 +6,14 @@ Persists user defaults and last-publish state to ~/.config/mdf_agent/config.json
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+
+# flip to 'prod' at cutover (burndown O-1) — requires api.materialsdatafacility.org to exist (O-5)
+DEFAULT_SERVICE = "staging"
 
 
 def _default_config_path() -> Path:
@@ -124,8 +129,11 @@ def validate_config_value(key: str, value: str) -> Optional[str]:
 
 
 def resolve_service(explicit: Optional[str]) -> str:
-    """Resolve the service instance: explicit flag > config default > 'staging'."""
+    """Resolve the service: explicit > MDF_SERVICE > config > release default."""
     if explicit:
         return explicit
+    environment = os.environ.get("MDF_SERVICE")
+    if environment:
+        return environment
     cfg = GlobalConfig()
-    return cfg.service or "staging"
+    return cfg.service or DEFAULT_SERVICE

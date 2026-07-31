@@ -8,6 +8,8 @@ from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
+from mdf_agent.core import config as core_config
+
 _V2_API_URLS = {
     "prod": "https://api.materialsdatafacility.org",
     "dev": "https://api-dev.materialsdatafacility.org",
@@ -16,11 +18,11 @@ _V2_API_URLS = {
 }
 
 
-def _api_url_for_service(service_instance: str) -> str:
+def _api_url_for_service(service_instance: Optional[str] = None) -> str:
     override_url = os.environ.get("MDF_API_URL")
     if override_url:
         return override_url
-    normalized = (service_instance or "prod").strip().lower()
+    normalized = core_config.resolve_service(service_instance).strip().lower()
     if normalized == "production":
         normalized = "prod"
     elif normalized == "development":
@@ -56,7 +58,7 @@ class BackendClient:
 
     @classmethod
     def from_env(cls) -> "BackendClient":
-        base_url = os.environ.get("MDF_API_URL", "http://127.0.0.1:8080")
+        base_url = os.environ.get("MDF_API_URL") or _api_url_for_service()
         token = os.environ.get("MDF_CONNECT_TOKEN")
         user_id = os.environ.get("MDF_DEV_USER_ID")
         return cls(base_url=base_url, token=token, user_id=user_id)
@@ -66,7 +68,7 @@ class BackendClient:
         cls,
         base_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ) -> "BackendClient":
         """Create an authenticated backend client.
@@ -78,8 +80,9 @@ class BackendClient:
         4. dev_user_id / MDF_DEV_USER_ID env var (X-User-Id)
         5. Interactive Globus OAuth2 login
         """
-        url = base_url or _api_url_for_service(service_instance)
-        normalized_service = (service_instance or "prod").strip().lower()
+        resolved_service = core_config.resolve_service(service_instance)
+        url = base_url or _api_url_for_service(resolved_service)
+        normalized_service = resolved_service.strip().lower()
 
         resolved_token = token or os.environ.get("MDF_CONNECT_TOKEN")
         if resolved_token:
@@ -98,7 +101,7 @@ class BackendClient:
                 get_scopes_for_service,
             )
 
-            scope, resource_server = get_scopes_for_service(service_instance)
+            scope, resource_server = get_scopes_for_service(resolved_service)
             confidential_client = globus_sdk.ConfidentialAppAuthClient(
                 confidential_client_id,
                 confidential_client_secret,
@@ -134,7 +137,7 @@ class BackendClient:
         # Lazy import so token/dev-user workflows do not require globus_sdk.
         from mdf_agent.auth.globus import get_authorizer_for_scopes, get_scopes_for_service, DATA_MDF_SCOPE, TRANSFER_SCOPE, GROUPS_SCOPE, NCSA_MDF_COLLECTION_UUID
 
-        scope, _resource_server = get_scopes_for_service(service_instance)
+        scope, _resource_server = get_scopes_for_service(resolved_service)
         authorizers = get_authorizer_for_scopes(
             [scope, DATA_MDF_SCOPE, TRANSFER_SCOPE, GROUPS_SCOPE],
         )
@@ -748,7 +751,22 @@ class BackendClient:
         for attempt in range(self._MAX_RETRIES + 1):
             try:
                 response = self._client.request(method, url, json=json_data, params=params, headers=headers)
-            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            except httpx.ConnectError as exc:
+                last_exc = exc
+                if self.base_url == _V2_API_URLS["prod"]:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Cannot connect to the production MDF API at {self.base_url}. "
+                            "The production service is not available yet; set "
+                            "MDF_SERVICE=staging and retry."
+                        ),
+                    }
+                if attempt < self._MAX_RETRIES:
+                    time.sleep(2 ** attempt)
+                    continue
+                return {"success": False, "error": f"Connection failed after {self._MAX_RETRIES + 1} attempts: {exc}"}
+            except httpx.ConnectTimeout as exc:
                 last_exc = exc
                 if attempt < self._MAX_RETRIES:
                     time.sleep(2 ** attempt)

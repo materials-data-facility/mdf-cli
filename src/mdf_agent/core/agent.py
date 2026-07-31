@@ -691,7 +691,7 @@ class MDFAgent:
         update: bool = False,
         dry_run: bool = True,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         api_url: Optional[str] = None,
         dev_user_id: Optional[str] = None,
         authorizer: Optional[Any] = None,
@@ -777,7 +777,7 @@ class MDFAgent:
         limit: int = 20,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Search datasets and streams."""
@@ -797,7 +797,7 @@ class MDFAgent:
         organization: Optional[str] = None,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """List datasets pending curation."""
@@ -819,7 +819,7 @@ class MDFAgent:
         version: Optional[str] = None,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Approve a dataset for publication."""
@@ -841,7 +841,7 @@ class MDFAgent:
         version: Optional[str] = None,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Reject a dataset and return to submitter."""
@@ -860,7 +860,7 @@ class MDFAgent:
         source_id: str,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get version history for a dataset."""
@@ -880,7 +880,7 @@ class MDFAgent:
         version: Optional[str] = None,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get dataset preview card."""
@@ -901,7 +901,7 @@ class MDFAgent:
         version: Optional[str] = None,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Get citation for a dataset."""
@@ -923,7 +923,7 @@ class MDFAgent:
         organization: Optional[str] = None,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ):
         client = BackendClient.authenticated(
@@ -944,7 +944,7 @@ class MDFAgent:
         total_bytes: Optional[int] = None,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ):
         client = BackendClient.authenticated(
@@ -962,7 +962,7 @@ class MDFAgent:
         stream_id: str,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ):
         client = BackendClient.authenticated(
@@ -986,7 +986,7 @@ class MDFAgent:
         license: Optional[str] = None,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ):
         client = BackendClient.authenticated(
@@ -1014,7 +1014,7 @@ class MDFAgent:
         update: bool = False,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ):
         client = BackendClient.authenticated(
@@ -1040,7 +1040,7 @@ class MDFAgent:
         stage_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Clone (download) a dataset's files.
@@ -1157,7 +1157,7 @@ class MDFAgent:
         method: str = "auto",
         api_url: Optional[str] = None,
         token: Optional[str] = None,
-        service_instance: str = "prod",
+        service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Inspect how clone will behave without downloading data."""

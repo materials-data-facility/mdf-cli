@@ -17,6 +17,8 @@ console = Console()
 
 app = typer.Typer(help="MDF Streaming commands")
 _auth_opts: Dict[str, Optional[str]] = {"service": None, "token": None, "dev_user": None}
+STREAMING_ENABLED = False
+_DISABLED_MESSAGE = "file streaming is disabled in the current MDF release"
 
 
 @app.callback()
@@ -26,6 +28,9 @@ def stream_callback(
     dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id (X-User-Id)"),
 ):
     """MDF Streaming commands."""
+    if not STREAMING_ENABLED:
+        console.print(f"[yellow]{_DISABLED_MESSAGE}[/yellow]")
+        raise typer.Exit(code=1)
     _auth_opts.update(service=service, token=token, dev_user=dev_user)
 
 
@@ -42,7 +47,7 @@ def _print(result):
     typer.echo(json.dumps(result, indent=2))
 
 
-@app.command("create")
+@app.command("create", hidden=True)
 def create(
     title: str = typer.Option(..., "--title"),
     lab_id: Optional[str] = typer.Option(None, "--lab-id"),
@@ -62,7 +67,7 @@ def create(
             handle_api_result(result, error_prefix="Stream create failed")
 
 
-@app.command("append")
+@app.command("append", hidden=True)
 def append(
     stream_id: str = typer.Option(..., "--stream-id"),
     files: Optional[Path] = typer.Option(None, "--files", help="JSON list of files or dict with files"),
@@ -87,7 +92,7 @@ def append(
     format_result_or_json(result, json_output, success_msg="Files appended", error_prefix="Append failed")
 
 
-@app.command("status")
+@app.command("status", hidden=True)
 def status(
     stream_id: str = typer.Option(..., "--stream-id"),
     api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API base URL"),
@@ -99,7 +104,7 @@ def status(
     format_result_or_json(result, json_output, error_prefix="Stream status")
 
 
-@app.command("close")
+@app.command("close", hidden=True)
 def close(
     stream_id: str = typer.Option(..., "--stream-id"),
     mint_doi: Optional[bool] = typer.Option(None, "--mint-doi/--no-mint-doi"),
@@ -133,7 +138,7 @@ def close(
     format_result_or_json(result, json_output, success_msg=f"Stream closed: {stream_id}", error_prefix="Stream close failed")
 
 
-@app.command("snapshot")
+@app.command("snapshot", hidden=True)
 def snapshot(
     stream_id: str = typer.Option(..., "--stream-id"),
     title: Optional[str] = typer.Option(None, "--title"),
@@ -150,7 +155,7 @@ def snapshot(
 _PRESIGNED_THRESHOLD = 6 * 1024 * 1024  # 6 MB
 
 
-@app.command("upload")
+@app.command("upload", hidden=True)
 def upload(
     stream_id: str = typer.Option(..., "--stream-id"),
     files: List[Path] = typer.Argument(..., help="Files to upload"),
@@ -283,9 +288,10 @@ def upload(
         console.print(f"\n[red]Errors ({len(errors)}):[/red]")
         for err in errors:
             console.print(f"  [red]x[/red] {err['file']}: {err['error']}")
+        raise typer.Exit(code=1)
 
 
-@app.command("files")
+@app.command("files", hidden=True)
 def list_files(
     stream_id: str = typer.Option(..., "--stream-id"),
     api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API base URL"),

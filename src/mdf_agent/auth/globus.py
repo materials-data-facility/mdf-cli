@@ -20,6 +20,8 @@ from globus_sdk import (
 )
 from globus_sdk.tokenstorage import JSONTokenStorage
 
+from mdf_agent.core import config as core_config
+
 # =============================================================================
 # MDF Agent Credentials
 # =============================================================================
@@ -64,7 +66,7 @@ CLONE_SCOPES = [DATA_MDF_SCOPE, TRANSFER_SCOPE]
 TRANSFER_SCOPES = [TRANSFER_SCOPE, DATA_MDF_SCOPE]
 
 
-def get_scopes_for_service(service_instance: str = "prod") -> tuple[str, str]:
+def get_scopes_for_service(service_instance: Optional[str] = None) -> tuple[str, str]:
     """Get the appropriate scope and resource server for a service instance.
 
     Args:
@@ -73,7 +75,8 @@ def get_scopes_for_service(service_instance: str = "prod") -> tuple[str, str]:
     Returns:
         Tuple of (scope, resource_server_id)
     """
-    if service_instance in ("dev", "development"):
+    resolved_service = core_config.resolve_service(service_instance).strip().lower()
+    if resolved_service in ("dev", "development"):
         return MDF_CONNECT_DEV_SCOPE, MDF_CONNECT_DEV_RESOURCE_SERVER
     # staging uses prod auth (same Globus introspection)
     return MDF_CONNECT_SCOPE, MDF_CONNECT_RESOURCE_SERVER
@@ -83,7 +86,7 @@ def get_authorizer(
     token: Optional[str] = None,
     client_id: Optional[str] = None,
     scope: Optional[str] = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     app_name: str = APP_NAME,
     token_path: Path = DEFAULT_TOKEN_PATH,
 ) -> AccessTokenAuthorizer | RefreshTokenAuthorizer:
@@ -244,7 +247,7 @@ def logout(token_path: Path = DEFAULT_TOKEN_PATH) -> bool:
 
 
 def is_logged_in(
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     client_id: Optional[str] = None,
     token_path: Path = DEFAULT_TOKEN_PATH,
 ) -> bool:

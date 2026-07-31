@@ -17,6 +17,7 @@ from mdf_agent.cli.formatting import format_result_or_json, format_status_badge,
 app = typer.Typer(help="Interact with MDF backend (v2) API")
 console = Console()
 _auth_opts: Dict[str, Optional[str]] = {"service": None, "token": None, "dev_user": None}
+_STREAMING_DISABLED_MESSAGE = "file streaming is disabled in the current MDF release"
 
 
 @app.callback()
@@ -55,6 +56,11 @@ def _read_client(api_url: Optional[str]) -> BackendClient:
 
 def _print(result):
     typer.echo(json.dumps(result, indent=2))
+
+
+def _streaming_disabled() -> None:
+    console.print(f"[yellow]{_STREAMING_DISABLED_MESSAGE}[/yellow]")
+    raise typer.Exit(code=1)
 
 
 @app.command("health")
@@ -240,7 +246,7 @@ def update_status(
     format_result_or_json(result, json_output, success_msg=f"Status updated: {source_id} → {status}", error_prefix="Update failed")
 
 
-@app.command("stream-create")
+@app.command("stream-create", hidden=True)
 def stream_create(
     title: str = typer.Option(..., "--title"),
     lab_id: Optional[str] = typer.Option(None, "--lab-id"),
@@ -248,6 +254,7 @@ def stream_create(
     api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API base URL"),
     json_output: bool = typer.Option(False, "--json", help="Raw JSON output"),
 ):
+    _streaming_disabled()
     client = _client(api_url)
     result = client.stream_create(title, lab_id=lab_id, organization=organization)
     client.close()
@@ -260,7 +267,7 @@ def stream_create(
             handle_api_result(result, error_prefix="Stream create failed")
 
 
-@app.command("stream-append")
+@app.command("stream-append", hidden=True)
 def stream_append(
     stream_id: str = typer.Option(..., "--stream-id"),
     files: Optional[Path] = typer.Option(None, "--files", help="JSON list of files or dict with files"),
@@ -269,6 +276,7 @@ def stream_append(
     api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API base URL"),
     json_output: bool = typer.Option(False, "--json", help="Raw JSON output"),
 ):
+    _streaming_disabled()
     client = _client(api_url)
     files_payload = None
     if files:
@@ -285,12 +293,13 @@ def stream_append(
     format_result_or_json(result, json_output, success_msg="Files appended", error_prefix="Append failed")
 
 
-@app.command("stream-status")
+@app.command("stream-status", hidden=True)
 def stream_status(
     stream_id: str = typer.Option(..., "--stream-id"),
     api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API base URL"),
     json_output: bool = typer.Option(False, "--json", help="Raw JSON output"),
 ):
+    _streaming_disabled()
     client = _client(api_url)
     result = client.stream_status(stream_id)
     client.close()
@@ -306,7 +315,7 @@ def stream_status(
             handle_api_result(result, error_prefix="Stream status")
 
 
-@app.command("stream-close")
+@app.command("stream-close", hidden=True)
 def stream_close(
     stream_id: str = typer.Option(..., "--stream-id"),
     mint_doi: Optional[bool] = typer.Option(None, "--mint-doi/--no-mint-doi"),
@@ -318,6 +327,7 @@ def stream_close(
     api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API base URL"),
     json_output: bool = typer.Option(False, "--json", help="Raw JSON output"),
 ):
+    _streaming_disabled()
     authors_payload = None
     if authors:
         authors_payload = json.loads(authors.read_text(encoding="utf-8"))
@@ -340,7 +350,7 @@ def stream_close(
     format_result_or_json(result, json_output, success_msg=f"Stream closed: {stream_id}", error_prefix="Stream close failed")
 
 
-@app.command("stream-snapshot")
+@app.command("stream-snapshot", hidden=True)
 def stream_snapshot(
     stream_id: str = typer.Option(..., "--stream-id"),
     title: Optional[str] = typer.Option(None, "--title"),
@@ -348,6 +358,7 @@ def stream_snapshot(
     api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API base URL"),
     json_output: bool = typer.Option(False, "--json", help="Raw JSON output"),
 ):
+    _streaming_disabled()
     client = _client(api_url)
     result = client.stream_snapshot(stream_id, title=title, update=update)
     client.close()

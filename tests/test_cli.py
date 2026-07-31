@@ -285,6 +285,20 @@ class TestCLIHelp:
         assert "More" in result.stdout
         assert "│ stream" not in result.stdout.lower()
 
+    def test_stream_commands_are_hidden_from_help(self):
+        backend_help = runner.invoke(app, ["backend", "--help"])
+        stream_help = runner.invoke(app, ["stream", "--help"])
+
+        assert backend_help.exit_code == 0
+        assert "stream-create" not in backend_help.stdout
+        assert "stream-append" not in backend_help.stdout
+        assert "stream-status" not in backend_help.stdout
+        assert "stream-close" not in backend_help.stdout
+        assert "stream-snapshot" not in backend_help.stdout
+        assert stream_help.exit_code == 0
+        assert " upload " not in stream_help.stdout
+        assert " create " not in stream_help.stdout
+
     def test_first_run_panel_mentions_setup(self, monkeypatch):
         with TemporaryDirectory() as tmpdir:
             monkeypatch.setenv("HOME", tmpdir)
@@ -369,22 +383,53 @@ class TestAuthCommands:
     """Tests for login/logout/whoami commands."""
 
     def test_login_invokes_auth(self, monkeypatch):
-        called = {"ok": False, "service": None, "token": None}
+        called = {"method": None, "url": None, "headers": None}
 
-        def fake_get_authorizer(*, token=None, service_instance="prod", **kwargs):
-            called["ok"] = True
-            called["service"] = service_instance
-            called["token"] = token
-            return object()
+        class FakeResponse:
+            status_code = 200
+            headers = {}
+            text = ""
 
-        monkeypatch.setattr("mdf_agent.auth.globus.get_authorizer", fake_get_authorizer)
+            def json(self):
+                return {"success": True, "user_id": "user-1"}
+
+        def fake_request(self, method, url, **kwargs):
+            called["method"] = method
+            called["url"] = url
+            called["headers"] = kwargs.get("headers")
+            return FakeResponse()
+
+        monkeypatch.setattr("httpx.Client.request", fake_request)
 
         result = runner.invoke(app, ["login", "--service", "dev", "--token", "abc123"])
         assert result.exit_code == 0
         assert "Authentication ready" in result.stdout
-        assert called["ok"] is True
-        assert called["service"] == "dev"
-        assert called["token"] == "abc123"
+        assert called["method"] == "GET"
+        assert called["url"] == "https://api-dev.materialsdatafacility.org/auth/check"
+        assert called["headers"] == {"Authorization": "Bearer abc123"}
+
+    def test_login_rejects_invalid_token(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("MDF_SERVICE", raising=False)
+
+        class FakeResponse:
+            status_code = 401
+            headers = {}
+            text = ""
+
+            def json(self):
+                return {"success": False, "detail": "invalid token"}
+
+        monkeypatch.setattr(
+            "httpx.Client.request",
+            lambda self, method, url, **kwargs: FakeResponse(),
+        )
+
+        result = runner.invoke(app, ["login", "--token", "bad-token"])
+        assert result.exit_code == 1
+        assert "Token validation failed for staging" in result.stdout
+        assert "invalid token" in result.stdout
+        assert "Authentication ready" not in result.stdout
 
     def test_logout_reports_success(self, monkeypatch):
         monkeypatch.setattr("mdf_agent.auth.globus.logout", lambda: True)
@@ -434,6 +479,38 @@ class TestSetupAndManifestUX:
             assert config["user"]["publisher"] == "My Publisher"
             assert not (dataset / "mdf.yaml").exists()
 
+    def test_setup_creates_publishable_manifest_and_prints_real_next_step(self, monkeypatch):
+        with TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            dataset = Path(tmpdir) / "dataset"
+            dataset.mkdir()
+            monkeypatch.setenv("HOME", str(home))
+
+            result = runner.invoke(
+                app,
+                ["setup", str(dataset)],
+                input=(
+                    "staging\n"
+                    "My Org\n"
+                    "My Publisher\n"
+                    "me@example.org\n"
+                    "y\n"
+                    "My Dataset\n"
+                    "Jane Doe\n"
+                    "A useful dataset\n"
+                ),
+            )
+
+            assert result.exit_code == 0
+            import yaml
+
+            manifest = yaml.safe_load((dataset / "mdf.yaml").read_text())
+            assert manifest["title"] == "My Dataset"
+            assert manifest["authors"] == ["Jane Doe"]
+            assert manifest["description"] == "A useful dataset"
+            assert "mdf manifest inspect" in result.stdout
+            assert "mdf config manifest inspect" not in result.stdout
+
     def test_manifest_discover_preview_does_not_mutate_manifest(self):
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -479,6 +556,122 @@ class TestSetupAndManifestUX:
             assert result.exit_code == 0
             assert "Resolved sources" in result.stdout
             assert "./data.csv" in result.stdout
+
+
+class TestListAndStreamRegressions:
+    def test_list_json_applies_filters_and_limit(self, monkeypatch):
+        class FakeClient:
+            def submissions(self):
+                return {
+                    "success": True,
+                    "total": 4,
+                    "submissions": [
+                        {
+                            "source_id": "keep-first",
+                            "status": "published",
+                            "dataset_mdata": json.dumps(
+                                {"title": "Target material", "latest": True}
+                            ),
+                        },
+                        {
+                            "source_id": "keep-second",
+                            "status": "published",
+                            "dataset_mdata": {
+                                "title": "Another target material",
+                                "latest": True,
+                            },
+                        },
+                        {
+                            "source_id": "wrong-status",
+                            "status": "rejected",
+                            "dataset_mdata": {
+                                "title": "Target material",
+                                "latest": True,
+                            },
+                        },
+                        {
+                            "source_id": "old-version",
+                            "status": "published",
+                            "dataset_mdata": {
+                                "title": "Target material",
+                                "latest": False,
+                            },
+                        },
+                    ],
+                }
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(
+            "mdf_agent.cli.main.BackendClient.authenticated",
+            lambda **kwargs: FakeClient(),
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "list",
+                "--json",
+                "--status",
+                "published",
+                "--search",
+                "target",
+                "--latest-only",
+                "--limit",
+                "1",
+            ],
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["total"] == 1
+        assert [record["source_id"] for record in payload["submissions"]] == [
+            "keep-first"
+        ]
+
+    def test_stream_disabled_warning_exits_nonzero(self):
+        result = runner.invoke(
+            app,
+            ["stream", "upload", "--stream-id", "stream-1", "missing.csv"],
+        )
+        assert result.exit_code == 1
+        assert "file streaming is disabled in the current MDF release" in result.stdout
+
+    def test_backend_stream_command_is_disabled(self):
+        result = runner.invoke(
+            app,
+            ["backend", "stream-create", "--title", "Lab run"],
+        )
+        assert result.exit_code == 1
+        assert "file streaming is disabled in the current MDF release" in result.stdout
+
+    def test_stream_upload_exits_nonzero_when_file_fails(self, monkeypatch, tmp_path):
+        from mdf_agent.cli import stream as stream_cli
+
+        data_file = tmp_path / "data.csv"
+        data_file.write_text("a,b\n1,2\n")
+
+        class FakeClient:
+            def stream_upload(self, stream_id, filename, content):
+                return {"success": False, "error": "upload rejected"}
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(stream_cli, "STREAMING_ENABLED", True)
+        monkeypatch.setattr(
+            "mdf_agent.cli.stream.BackendClient.authenticated",
+            lambda **kwargs: FakeClient(),
+        )
+
+        result = runner.invoke(
+            app,
+            ["stream", "upload", "--stream-id", "stream-1", str(data_file)],
+        )
+
+        assert result.exit_code == 1
+        assert "upload rejected" in result.stdout
 
 
 class TestPreflightAndIdentifiers:

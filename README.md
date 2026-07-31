@@ -107,14 +107,8 @@ mdf reject my_dataset_v1 --reason "Missing methods"  # Reject with reason
 
 ### Streaming (automated labs)
 
-```bash
-mdf stream create --title "Lab 42 XRD Run"
-mdf stream upload --stream-id ID data.csv            # Upload files (progress bar for >6MB)
-mdf stream status --stream-id ID
-mdf stream snapshot --stream-id ID                   # Snapshot to dataset
-mdf stream close --stream-id ID --mint-doi           # Close and mint DOI
-mdf stream files --stream-id ID                      # List uploaded files
-```
+File streaming is disabled for the initial MDF v2 release. Datasets publish by
+reference to configured Globus data sources instead.
 
 ### Configuration
 
@@ -185,9 +179,7 @@ agent.manifest.data_sources = ["./data"]
 agent.save_manifest()
 result = agent.publish(service_instance="staging", dry_run=False)
 
-# Streaming
-stream = agent.stream_create("Lab Run", service_instance="staging")
-agent.stream_close(stream["stream_id"], mint_doi=True, service_instance="staging")
+# File streaming is disabled for the initial MDF v2 release.
 ```
 
 ### BackendClient (low-level API)
@@ -205,11 +197,6 @@ results = client.search("iron oxide")
 # Versions and citations
 versions = client.versions("my_dataset_v1")
 citation = client.get_citation("my_dataset_v1", format="bibtex")
-
-# Streaming
-stream = client.stream_create("Lab Run")
-client.stream_upload(stream["stream_id"], "data.csv", content)
-client.stream_close(stream["stream_id"], mint_doi=True)
 
 client.close()
 ```
@@ -244,9 +231,10 @@ Alternatively, pass a pre-existing access token via `MDF_CONNECT_TOKEN`.
 All HTTP requests automatically retry on transient errors:
 - **429** (rate limited): respects `Retry-After` header
 - **502, 503, 504** (server errors): exponential backoff
-- **Connection errors**: 3 retries with backoff
+- **Connection errors**: 3 retries with backoff, except the unavailable production
+  host fails fast with guidance to use staging
 
-File uploads (`_https_put_file`) also retry on 502/503/504 and connection errors. SSL verification for the Globus HTTPS endpoint is configurable via `MDF_SSL_VERIFY` (default: `false`, as the Globus endpoint uses a private CA).
+File uploads (`_https_put_file`) also retry on 502/503/504 and connection errors. SSL verification for the Globus HTTPS endpoint is configurable via `MDF_SSL_VERIFY` (default: `true`).
 
 ## Semantic search and embeddings
 
@@ -301,31 +289,11 @@ Each embedded record carries `embedding_generated_at`; each metadata write stamp
 
 ### First-time deploy
 
-The embedding pipeline needs an OpenAI key and an S3 bucket. Deploy once with:
-
-```bash
-# 1. Stash the key in SSM (one time per environment)
-aws ssm put-parameter \
-  --name /mdf/staging/openai-api-key \
-  --value "sk-..." \
-  --type SecureString \
-  --overwrite
-
-# 2. Build + deploy — creates the mdf-embeddings-<env> bucket, IAM, env vars
-cd cs/aws
-sam build
-sam deploy \
-  --config-file samconfig.toml \
-  --config-env staging \
-  --parameter-overrides \
-    OpenAIApiKey=$(aws ssm get-parameter \
-      --name /mdf/staging/openai-api-key --with-decryption \
-      --query Parameter.Value --output text)
-
-# 3. Backfill any datasets that pre-date the feature
-mdf admin rebuild-embeddings --service staging --yes
-mdf admin embedding-status --service staging    # wait until with_embedding == published_total
-```
+Backend deployment, including the embedding pipeline and its OpenAI/S3
+configuration, is maintained in the sibling
+[`connect_server`](https://github.com/materials-data-facility/connect_server)
+repository. Follow that repository's deployment instructions, then backfill
+existing datasets with `mdf admin rebuild-embeddings --service staging --yes`.
 
 Switching models later: update `EmbeddingModel` (and `EmbeddingDims` if changing size) in the SAM template, redeploy, then `mdf admin rebuild-embeddings` — records with the old model stamp get re-embedded automatically; same-model ones are skipped.
 
@@ -335,12 +303,16 @@ The snapshot bucket has CORS open for browser reads. If you front it with CloudF
 
 ## Connecting to the backend
 
-| Environment | API URL | How to deploy |
-|-------------|---------|---------------|
-| dev | `./deploy.sh status dev` for URL | `cd cs/aws && sam build && ./deploy.sh dev` |
-| staging | `https://3xicgt0g7l.execute-api.us-east-1.amazonaws.com/staging` | `cd cs/aws && sam build && ./deploy.sh staging` |
-| prod | `./deploy.sh status prod` for URL | `cd cs/aws && sam build && ./deploy.sh prod` |
-| local | `http://127.0.0.1:8080` | `cd cs/aws && ./deploy.sh local` |
+| Environment | API URL |
+|-------------|---------|
+| dev | See the sibling `connect_server` repository |
+| staging | `https://3xicgt0g7l.execute-api.us-east-1.amazonaws.com/staging` |
+| prod | `https://api.materialsdatafacility.org` (available after production cutover) |
+| local | `http://127.0.0.1:8080` |
+
+Deployment commands and backend environment configuration live in the sibling
+[`connect_server`](https://github.com/materials-data-facility/connect_server)
+repository.
 
 ## Running tests
 
@@ -348,8 +320,7 @@ The snapshot bucket has CORS open for browser reads. If you front it with CloudF
 # Client tests
 python -m pytest tests/ -v --ignore=tests/test_connect_client.py
 
-# Backend tests (no AWS credentials needed)
-cd cs/aws && python -m pytest v2/test_v2_*.py -v
+# Backend tests are run from the sibling connect_server repository.
 ```
 
 ## Legacy

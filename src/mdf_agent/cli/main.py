@@ -483,7 +483,7 @@ def setup(
     console.print(f"\n[bold]MDF Agent setup[/bold] v{__version__}\n")
 
     cfg = GlobalConfig()
-    service_default = cfg.service or "staging"
+    service_default = resolve_service(None)
     service = typer.prompt(
         "Default service",
         default=service_default,
@@ -533,11 +533,29 @@ def setup(
         if suggestions:
             console.print(f"[dim]Detected data candidates:[/dim] {', '.join(suggestions)}")
         if typer.confirm("Create mdf.yaml in this directory?", default=True):
+            manifest_title = typer.prompt(
+                "Dataset title",
+                default=root.name,
+                show_default=True,
+            ).strip()
+            if publisher:
+                manifest_author = typer.prompt(
+                    "Author",
+                    default=publisher,
+                    show_default=True,
+                ).strip()
+            else:
+                manifest_author = typer.prompt("Author").strip()
+            manifest_description = typer.prompt(
+                "Description (optional)",
+                default="",
+                show_default=False,
+            ).strip()
             manifest_init(
                 path=str(root),
-                title=None,
-                author=None,
-                description=None,
+                title=manifest_title,
+                author=[manifest_author],
+                description=manifest_description or None,
                 publisher=publisher or None,
                 publication_year=None,
                 organization=organization or None,
@@ -548,7 +566,7 @@ def setup(
     if not authed:
         console.print(f"  [cyan]mdf login --service {service}[/cyan]")
     if manifest_path.exists() or (root / "mdf.yaml").exists():
-        console.print("  [cyan]mdf config manifest inspect[/cyan]")
+        console.print("  [cyan]mdf manifest inspect[/cyan]")
         console.print("  [cyan]mdf publish --preflight-only[/cyan]")
         console.print("  [cyan]mdf publish --submit[/cyan]")
     else:
@@ -583,8 +601,24 @@ def login(
     resolved = resolve_service(service)
 
     if token:
-        from mdf_agent.auth.globus import get_authorizer
-        get_authorizer(token=token, service_instance=resolved)
+        client = BackendClient.authenticated(token=token, service_instance=resolved)
+        try:
+            auth_result = client.auth_check()
+        except Exception as exc:
+            console.print(f"[red]Token validation failed for {resolved}:[/red] {exc}")
+            raise typer.Exit(code=1)
+        finally:
+            client.close()
+        if (
+            not auth_result
+            or auth_result.get("success") is False
+            or auth_result.get("authenticated") is False
+            or auth_result.get("error")
+            or auth_result.get("detail")
+        ):
+            error = auth_result.get("error") or auth_result.get("detail") or "token was rejected"
+            console.print(f"[red]Token validation failed for {resolved}:[/red] {error}")
+            raise typer.Exit(code=1)
     else:
         scope, _rs = get_scopes_for_service(resolved)
         get_authorizer_for_scopes([scope, DATA_MDF_SCOPE, TRANSFER_SCOPE, GROUPS_SCOPE])
@@ -1377,10 +1411,6 @@ def list_datasets(
         result = client.submissions()
     client.close()
 
-    if json_output:
-        print(json.dumps(result, indent=2))
-        return
-
     submissions = result.get("submissions", [])
     filtered_submissions = []
     query = (search or "").strip().lower()
@@ -1411,6 +1441,18 @@ def list_datasets(
                 continue
         filtered_submissions.append((sub, mdata))
 
+    filtered_submissions = filtered_submissions[:limit]
+
+    if json_output:
+        filtered_result = dict(result)
+        filtered_result["submissions"] = [sub for sub, _mdata in filtered_submissions]
+        if "total" in filtered_result:
+            filtered_result["total"] = len(filtered_submissions)
+        if "count" in filtered_result:
+            filtered_result["count"] = len(filtered_submissions)
+        print(json.dumps(filtered_result, indent=2))
+        return
+
     if not filtered_submissions:
         console.print("\n[dim]No datasets found.[/dim]")
         return
@@ -1423,7 +1465,7 @@ def list_datasets(
     table.add_column("Status", no_wrap=True)
     table.add_column("Updated", style="dim", no_wrap=True)
 
-    for sub, mdata in filtered_submissions[:limit]:
+    for sub, mdata in filtered_submissions:
         title_str = mdata.get("title") or sub.get("title") or "Untitled"
         status_str = format_status_badge(sub.get("status", ""))
         updated = (sub.get("updated_at") or sub.get("created_at") or "")[:19]

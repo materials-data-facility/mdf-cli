@@ -32,7 +32,7 @@ def _run_backend_action(
     *,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
     **kwargs,
 ) -> Dict[str, Any]:
@@ -98,7 +98,7 @@ def publish(
     token: Optional[str] = None,
     client_id: Optional[str] = None,
     scope: Optional[str] = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     api_url: Optional[str] = None,
     dev_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -123,7 +123,7 @@ def stream_create(
     organization: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -146,7 +146,7 @@ def stream_append(
     total_bytes: int | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -167,7 +167,7 @@ def stream_status(
     stream_id: str,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -191,7 +191,7 @@ def stream_close(
     license: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -217,7 +217,7 @@ def stream_snapshot(
     update: bool = False,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -239,7 +239,7 @@ def curation_list_pending(
     organization: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -260,7 +260,7 @@ def curation_review(
     version: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -283,7 +283,7 @@ def curation_approve(
     version: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -308,7 +308,7 @@ def curation_reject(
     version: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -330,7 +330,7 @@ def check_status(
     version: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -349,7 +349,7 @@ def list_submissions(
     organization: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -369,7 +369,7 @@ def search_datasets(
     limit: int = 20,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -391,7 +391,7 @@ def get_citation(
     version: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -412,7 +412,7 @@ def get_card(
     version: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -431,7 +431,7 @@ def dataset_preview(
     source_id: str,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -449,7 +449,7 @@ def dataset_sample(
     source_id: str,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -471,7 +471,7 @@ def edit_metadata(
     keywords: list | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     fields = {}
@@ -500,7 +500,7 @@ def withdraw(
     version: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -522,7 +522,7 @@ def resubmit(
     version: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -544,7 +544,7 @@ def version_diff(
     to_version: str,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -566,7 +566,7 @@ def delete_submission(
     version: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -585,7 +585,7 @@ def delete_submission(
 def admin_stats(
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -602,7 +602,7 @@ def dataset_stats(
     source_id: str,
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(
@@ -619,7 +619,7 @@ def dataset_stats(
 def health_check(
     api_url: str | None = None,
     token: str | None = None,
-    service_instance: str = "prod",
+    service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
 ) -> Dict[str, Any]:
     return _run_backend_action(

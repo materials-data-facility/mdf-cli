@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from mdf_agent.auth.globus import is_logged_in
 from mdf_agent.core.agent import _extract_doi, _resolve_doi
 from mdf_agent.core.backend_client import BackendClient
+from mdf_agent.core.config import resolve_service
 from mdf_agent.core.validation import validate_manifest
 from mdf_agent.models.config import DataSource, ManifestConfig
 
@@ -69,7 +70,7 @@ def suggest_data_sources(root: Path, limit: int = 3) -> List[str]:
 
 
 def auth_ready(service: str, token: Optional[str] = None, dev_user: Optional[str] = None) -> bool:
-    normalized = (service or "staging").strip().lower()
+    normalized = resolve_service(service).strip().lower()
     if normalized == "local":
         return True
     if token or os.environ.get("MDF_CONNECT_TOKEN"):

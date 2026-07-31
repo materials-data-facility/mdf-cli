@@ -39,7 +39,7 @@ def format_status_badge(status: str) -> str:
 def read_client(
     api_url: Optional[str] = None,
     token: Optional[str] = None,
-    service: str = "staging",
+    service: Optional[str] = None,
     dev_user: Optional[str] = None,
 ):
     """Build a BackendClient for PUBLIC read endpoints.
