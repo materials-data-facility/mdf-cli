@@ -176,3 +176,73 @@ class TestValidate:
             results = agent.validate()
             # Should pass because directory has files (mdf.yaml counts as existing dir)
             # or fail because no data_sources and no non-hidden files
+
+
+class TestValidationWarnings:
+    """Tests for validate_manifest() warnings on rich metadata fields."""
+
+    def test_ml_without_data_format_warns(self):
+        """An ml block missing data_format produces a warning, not an error."""
+        from mdf_agent.core.validation import validate_manifest
+        from mdf_agent.models.config import ManifestConfig
+
+        manifest = ManifestConfig(
+            title="Test",
+            authors=["Jane"],
+            data_sources=["./data.csv"],
+            ml={"task_type": ["regression"]},
+        )
+        errors, warnings = validate_manifest(manifest)
+        assert not errors
+        assert any("data_format" in w for w in warnings)
+
+    def test_ml_with_data_format_no_warning(self):
+        from mdf_agent.core.validation import validate_manifest
+        from mdf_agent.models.config import ManifestConfig
+
+        manifest = ManifestConfig(
+            title="Test",
+            authors=["Jane"],
+            data_sources=["./data.csv"],
+            ml={"data_format": "csv"},
+        )
+        _errors, warnings = validate_manifest(manifest)
+        assert not any("data_format" in w for w in warnings)
+
+    def test_orcid_url_warns(self):
+        """An ORCID given as a URL produces a warning."""
+        from mdf_agent.core.validation import validate_manifest
+        from mdf_agent.models.config import Author, ManifestConfig
+
+        manifest = ManifestConfig(
+            title="Test",
+            authors=[Author(name="Doe, Jane", orcid="https://orcid.org/0000-0002-1825-0097")],
+            data_sources=["./data.csv"],
+        )
+        errors, warnings = validate_manifest(manifest)
+        assert not errors
+        assert any("orcid" in w.lower() for w in warnings)
+
+    def test_bare_orcid_no_warning(self):
+        from mdf_agent.core.validation import validate_manifest
+        from mdf_agent.models.config import Author, ManifestConfig
+
+        manifest = ManifestConfig(
+            title="Test",
+            authors=[Author(name="Doe, Jane", orcid="0000-0002-1825-0097")],
+            data_sources=["./data.csv"],
+        )
+        _errors, warnings = validate_manifest(manifest)
+        assert not any("orcid" in w.lower() for w in warnings)
+
+    def test_string_authors_do_not_break_orcid_check(self):
+        """Regression: bare-string authors have no .orcid attribute."""
+        from mdf_agent.core.validation import validate_manifest
+        from mdf_agent.models.config import ManifestConfig
+
+        manifest = ManifestConfig(
+            title="Test", authors=["Jane Doe"], data_sources=["./data.csv"]
+        )
+        errors, warnings = validate_manifest(manifest)
+        assert not errors
+        assert not any("orcid" in w.lower() for w in warnings)

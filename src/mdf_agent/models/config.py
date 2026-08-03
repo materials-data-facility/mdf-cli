@@ -41,7 +41,19 @@ class ManifestConfig(BaseModel):
 
     dataset_doi: Optional[str] = None
     related_dois: Optional[List[str]] = None
+    related_works: Optional[List[Dict[str, Any]]] = None
     subjects: Optional[List[str]] = None
+
+    # Attribution & scientific context (v2 flat metadata fields)
+    license: Optional[Union[str, Dict[str, Any]]] = None
+    funding: Optional[List[Dict[str, Any]]] = None
+    methods: Optional[List[str]] = None
+    facility: Optional[str] = None
+    fields_of_science: Optional[List[str]] = None
+    ml: Optional[Dict[str, Any]] = None
+    geo_locations: Optional[List[Dict[str, Any]]] = None
+    data_type: Optional[str] = None
+    formats: Optional[List[str]] = None
 
     data_sources: List[Union[str, DataSource]] = Field(default_factory=list)
 
@@ -143,12 +155,59 @@ class ManifestConfig(BaseModel):
         if self.external_source:
             payload["external_source"] = self.external_source
 
-        # Related works (from related_dois)
+        # Attribution & provenance
+        if self.license:
+            # A bare string is treated as an SPDX identifier ("CC-BY-4.0").
+            if isinstance(self.license, str):
+                payload["license"] = {"name": self.license, "identifier": self.license}
+            else:
+                payload["license"] = self.license
+        if self.funding:
+            payload["funding"] = self.funding
+
+        # Scientific context
+        if self.methods:
+            payload["methods"] = self.methods
+        if self.facility:
+            payload["facility"] = self.facility
+        if self.fields_of_science:
+            payload["fields_of_science"] = self.fields_of_science
+
+        # ML-ready structure (server validates the MLMetadata shape)
+        if self.ml:
+            payload["ml"] = self.ml
+
+        # Geospatial and data description
+        if self.geo_locations:
+            payload["geo_locations"] = self.geo_locations
+        if self.data_type:
+            payload["data_type"] = self.data_type
+        if self.formats:
+            payload["formats"] = self.formats
+
+        # Related works: expand the related_dois shorthand first, then merge the
+        # full-form related_works entries over it (deduped by identifier, richer
+        # full-form entries win).
+        related: List[Dict[str, Any]] = []
         if self.related_dois:
-            payload["related_works"] = [
+            related = [
                 {"identifier": doi, "identifier_type": "DOI", "relation_type": "References"}
                 for doi in self.related_dois
             ]
+        for work in self.related_works or []:
+            if not isinstance(work, dict):
+                continue
+            identifier = work.get("identifier")
+            existing = next(
+                (i for i, r in enumerate(related) if r.get("identifier") == identifier),
+                None,
+            )
+            if identifier and existing is not None:
+                related[existing] = work
+            else:
+                related.append(work)
+        if related:
+            payload["related_works"] = related
 
         # Extensions (from custom, projects minus foundry)
         extensions: Dict[str, Any] = {}

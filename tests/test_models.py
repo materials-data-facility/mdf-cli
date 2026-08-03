@@ -618,3 +618,161 @@ class TestToMetadataPayload:
         assert payload["external_doi"] == "10.5281/zenodo.1234567"
         assert "external_url" not in payload
         assert "external_source" not in payload
+
+
+class TestRichMetadataPassThrough:
+    """Rich v2 fields drafted into mdf.yaml must survive to_metadata_payload()."""
+
+    def test_license_string_becomes_mapping(self):
+        """A bare SPDX string is expanded to the License shape."""
+        manifest = ManifestConfig(title="T", authors=["Jane Doe"], license="CC-BY-4.0")
+        payload = manifest.to_metadata_payload()
+        assert payload["license"] == {"name": "CC-BY-4.0", "identifier": "CC-BY-4.0"}
+
+    def test_license_mapping_passes_through(self):
+        """A full license mapping is passed through unchanged."""
+        license_block = {
+            "name": "MIT License",
+            "identifier": "MIT",
+            "url": "https://opensource.org/licenses/MIT",
+        }
+        manifest = ManifestConfig(title="T", authors=["Jane Doe"], license=license_block)
+        payload = manifest.to_metadata_payload()
+        assert payload["license"] == license_block
+
+    def test_scientific_context_fields(self):
+        """methods/facility/fields_of_science flow through."""
+        manifest = ManifestConfig(
+            title="T",
+            authors=["Jane Doe"],
+            methods=["VASP 6.3.0, PBE"],
+            facility="Advanced Photon Source",
+            fields_of_science=["Materials Engineering"],
+        )
+        payload = manifest.to_metadata_payload()
+        assert payload["methods"] == ["VASP 6.3.0, PBE"]
+        assert payload["facility"] == "Advanced Photon Source"
+        assert payload["fields_of_science"] == ["Materials Engineering"]
+
+    def test_funding_passes_through(self):
+        funding = [{"funder_name": "DOE", "award_number": "DE-AC02-06CH11357"}]
+        manifest = ManifestConfig(title="T", authors=["Jane Doe"], funding=funding)
+        assert manifest.to_metadata_payload()["funding"] == funding
+
+    def test_ml_block_passes_through(self):
+        ml = {"data_format": "csv", "task_type": ["regression"], "n_items": 42}
+        manifest = ManifestConfig(title="T", authors=["Jane Doe"], ml=ml)
+        assert manifest.to_metadata_payload()["ml"] == ml
+
+    def test_data_description_fields(self):
+        """geo_locations/data_type/formats flow through."""
+        geo = [{"place": "Argonne, IL"}]
+        manifest = ManifestConfig(
+            title="T",
+            authors=["Jane Doe"],
+            geo_locations=geo,
+            data_type="tabular",
+            formats=["text/csv"],
+        )
+        payload = manifest.to_metadata_payload()
+        assert payload["geo_locations"] == geo
+        assert payload["data_type"] == "tabular"
+        assert payload["formats"] == ["text/csv"]
+
+    def test_rich_fields_omitted_when_unset(self):
+        """None of the new keys appear when they are not set."""
+        payload = ManifestConfig(title="T", authors=["Jane Doe"]).to_metadata_payload()
+        for key in (
+            "license", "funding", "methods", "facility", "fields_of_science",
+            "ml", "geo_locations", "data_type", "formats", "related_works",
+        ):
+            assert key not in payload
+
+    def test_related_works_full_form(self):
+        """Full-form related_works are emitted even with no related_dois."""
+        works = [{
+            "identifier": "10.1038/s41597-024-00000-0",
+            "identifier_type": "DOI",
+            "relation_type": "IsSupplementTo",
+        }]
+        manifest = ManifestConfig(title="T", authors=["Jane Doe"], related_works=works)
+        assert manifest.to_metadata_payload()["related_works"] == works
+
+    def test_related_works_merged_with_related_dois(self):
+        """related_dois expand first, then distinct related_works append."""
+        manifest = ManifestConfig(
+            title="T",
+            authors=["Jane Doe"],
+            related_dois=["10.1111/aaa"],
+            related_works=[{"identifier": "10.2222/bbb", "relation_type": "IsPartOf"}],
+        )
+        related = manifest.to_metadata_payload()["related_works"]
+        assert len(related) == 2
+        assert related[0] == {
+            "identifier": "10.1111/aaa",
+            "identifier_type": "DOI",
+            "relation_type": "References",
+        }
+        assert related[1]["identifier"] == "10.2222/bbb"
+
+    def test_related_works_dedup_prefers_full_form(self):
+        """A shared identifier keeps the richer full-form entry."""
+        manifest = ManifestConfig(
+            title="T",
+            authors=["Jane Doe"],
+            related_dois=["10.1111/aaa"],
+            related_works=[{
+                "identifier": "10.1111/aaa",
+                "identifier_type": "DOI",
+                "relation_type": "IsSupplementTo",
+                "description": "The paper",
+            }],
+        )
+        related = manifest.to_metadata_payload()["related_works"]
+        assert len(related) == 1
+        assert related[0]["relation_type"] == "IsSupplementTo"
+        assert related[0]["description"] == "The paper"
+
+    def test_related_dois_alone_unchanged(self):
+        """Regression: the existing related_dois-only behavior is preserved."""
+        manifest = ManifestConfig(
+            title="T", authors=["Jane Doe"], related_dois=["10.1111/aaa", "10.2222/bbb"]
+        )
+        related = manifest.to_metadata_payload()["related_works"]
+        assert [r["identifier"] for r in related] == ["10.1111/aaa", "10.2222/bbb"]
+        assert all(r["relation_type"] == "References" for r in related)
+
+    def test_rich_fields_reach_the_submission_payload(self):
+        """End-to-end: build_submission carries the rich fields into the wire payload."""
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        from mdf_agent.core.submission import build_submission
+
+        manifest = ManifestConfig(
+            title="T",
+            authors=["Jane Doe"],
+            data_sources=["."],
+            license="MIT",
+            funding=[{"funder_name": "DOE"}],
+            methods=["XRD"],
+            facility="APS",
+            fields_of_science=["Materials Engineering"],
+            ml={"data_format": "csv"},
+            geo_locations=[{"place": "Argonne, IL"}],
+            data_type="tabular",
+            formats=["text/csv"],
+        )
+        with TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "data.csv").write_text("a,b\n1,2\n")
+            payload = build_submission(manifest, Path(tmpdir))
+
+        assert payload["license"] == {"name": "MIT", "identifier": "MIT"}
+        assert payload["funding"] == [{"funder_name": "DOE"}]
+        assert payload["methods"] == ["XRD"]
+        assert payload["facility"] == "APS"
+        assert payload["fields_of_science"] == ["Materials Engineering"]
+        assert payload["ml"] == {"data_format": "csv"}
+        assert payload["geo_locations"] == [{"place": "Argonne, IL"}]
+        assert payload["data_type"] == "tabular"
+        assert payload["formats"] == ["text/csv"]

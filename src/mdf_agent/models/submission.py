@@ -38,6 +38,10 @@ class Submission(BaseModel):
 
     ml: Optional[Dict[str, Any]] = None
 
+    geo_locations: Optional[List[Dict[str, Any]]] = None
+    data_type: Optional[str] = None
+    formats: Optional[List[str]] = None
+
     extensions: Optional[Dict[str, Any]] = None
 
     # Legacy fields (still supported for backward compat with old clients)
@@ -122,6 +126,14 @@ class Submission(BaseModel):
         # ML metadata
         if self.ml:
             payload["ml"] = self.ml
+
+        # Geospatial and data description
+        if self.geo_locations:
+            payload["geo_locations"] = self.geo_locations
+        if self.data_type:
+            payload["data_type"] = self.data_type
+        if self.formats:
+            payload["formats"] = self.formats
 
         # Extensions
         if self.extensions:

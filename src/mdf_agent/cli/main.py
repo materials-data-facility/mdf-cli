@@ -43,6 +43,7 @@ from mdf_agent.cli.stream import app as stream_app
 from mdf_agent.cli.config_cmd import app as config_app
 from mdf_agent.cli.dataset_cmd import app as dataset_app
 from mdf_agent.cli.admin_cmd import app as admin_app
+from mdf_agent.cli.skill_cmd import app as skill_app
 from mdf_agent.cli.preflight import (
     auth_ready,
     resolve_dataset_identifier,
@@ -90,6 +91,7 @@ typer_rich_utils.Panel = _help_panel
 app.add_typer(dataset_app, name="dataset", rich_help_panel=PANEL_MORE)
 app.add_typer(admin_app, name="admin", rich_help_panel=PANEL_MORE)
 app.add_typer(config_app, name="config", rich_help_panel=PANEL_MORE)
+app.add_typer(skill_app, name="skill", rich_help_panel=PANEL_MORE)
 
 # Hidden sub-apps
 app.add_typer(backend_app, name="backend", hidden=True)

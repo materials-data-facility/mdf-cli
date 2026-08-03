@@ -59,4 +59,15 @@ def validate_manifest(
     if manifest.dataset_doi and not str(manifest.dataset_doi).startswith("10."):
         warnings.append("dataset_doi does not look like a DOI")
 
+    if manifest.ml and not manifest.ml.get("data_format"):
+        warnings.append("ml block is missing required field: data_format")
+
+    for author in manifest.authors or []:
+        orcid = getattr(author, "orcid", None)
+        if orcid and str(orcid).lower().startswith("http"):
+            warnings.append(
+                f"orcid for '{getattr(author, 'name', orcid)}' should be a bare ID "
+                "(0000-0000-0000-0000), not a URL"
+            )
+
     return errors, warnings
