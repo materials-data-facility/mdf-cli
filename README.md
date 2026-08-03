@@ -5,13 +5,13 @@ Python client and CLI for the [MDF Connect v2](https://github.com/materials-data
 ## Install
 
 ```bash
-pipx install mdf-agent
+pipx install mdf-cli
 
 # or
-pip install mdf-agent
+pip install mdf-cli
 
 # With metadata extractors (PDF, CSV, Excel)
-pip install "mdf-agent[extractors]"
+pip install "mdf-cli[extractors]"
 ```
 
 See [Development](#development) below for an editable/source install.

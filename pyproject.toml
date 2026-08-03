@@ -3,7 +3,7 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mdf-agent"
+name = "mdf-cli"
 dynamic = ["version"]
 description = "Modern MDF Connect client with CLI, Python API, and Claude skill integration."
 readme = "README.md"

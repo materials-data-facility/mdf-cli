@@ -45,7 +45,7 @@ mdf --version
 ```
 
 If `mdf` is not found, tell the user to install it and stop:
-`pipx install mdf-agent` (preferred) or `pip install mdf-agent`.
+`pipx install mdf-cli` (preferred) or `pip install mdf-cli`.
 
 ```bash
 mdf status --auth --service staging

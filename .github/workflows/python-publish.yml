@@ -1,5 +1,5 @@
 # Before the first release, register this repository and workflow as a trusted
-# publisher for the mdf-agent project on PyPI and create the "pypi" GitHub environment.
+# publisher for the mdf-cli project on PyPI and create the "pypi" GitHub environment.
 name: Upload Python Package to PyPI
 
 on:
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/mdf-agent
+      url: https://pypi.org/p/mdf-cli
     permissions:
       id-token: write
 

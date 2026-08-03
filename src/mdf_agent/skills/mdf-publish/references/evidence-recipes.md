@@ -60,7 +60,7 @@ head -3 data.csv
 wc -l data.csv
 ```
 
-With pandas available (an optional extra: `pip install 'mdf-agent[extractors]'`):
+With pandas available (an optional extra: `pip install 'mdf-cli[extractors]'`):
 
 ```python
 import pandas as pd

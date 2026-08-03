@@ -8,7 +8,7 @@
    ``mdf_forge`` / ``mdf_connect_client`` packages preserved under ``legacy/``).
    They are not maintained for the current release.
 
-   For the current ``mdf-agent`` CLI, Python SDK, and agent skill, see the
+   For the current ``mdf-cli`` CLI, Python SDK, and agent skill, see the
    `root README <https://github.com/materials-data-facility/mdf_client#readme>`_
    instead.
 

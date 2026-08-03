@@ -121,7 +121,7 @@ def skill_install(
     source = _bundle_path(name)
     if not source.is_dir():
         console.print(f"[red]Packaged skill not found:[/red] {source}")
-        console.print("[dim]The installed mdf-agent build may be missing its skill data.[/dim]")
+        console.print("[dim]The installed mdf-cli build may be missing its skill data.[/dim]")
         raise typer.Exit(code=1)
 
     selected = _selected_agents(agent)
@@ -171,7 +171,7 @@ def skill_path(
 
 @app.command("list")
 def skill_list():
-    """List the skill bundles shipped with mdf-agent."""
+    """List the skill bundles shipped with mdf-cli."""
     table = Table(show_header=True, header_style="bold")
     table.add_column("Skill")
     table.add_column("Packaged", style="dim")
