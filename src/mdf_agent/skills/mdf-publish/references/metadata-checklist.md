@@ -248,8 +248,9 @@ published — scratch output, credentials, unrelated work.
 ### `publisher:` / `publication_year:` / `resource_type:`
 `publisher` defaults to "Materials Data Facility"; leave it unless the user is publishing
 on behalf of a named repository. `publication_year` is an integer. `resource_type`
-defaults to `Dataset`. **None of these three are editable after publication** — get
-`publication_year` right the first time.
+defaults to `Dataset`. `publisher` and `publication_year` are correctable after
+publication via the metadata-edit path (a minor version bump); `resource_type` is
+**not editable** — still get `publication_year` right the first time.
 
 ### `update_metadata_only: true`
 Metadata-only resubmission — no data upload. Required for enrichment mode (SKILL.md

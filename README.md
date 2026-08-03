@@ -5,11 +5,16 @@ Python client and CLI for the [MDF Connect v2](https://github.com/materials-data
 ## Install
 
 ```bash
-pip install -e .
+pipx install mdf-agent
+
+# or
+pip install mdf-agent
 
 # With metadata extractors (PDF, CSV, Excel)
-pip install -e ".[extractors]"
+pip install "mdf-agent[extractors]"
 ```
+
+See [Development](#development) below for an editable/source install.
 
 ## Quick start
 
@@ -21,7 +26,7 @@ mdf login
 mdf publish ./data/ --title "My Dataset" --author "Jane Doe" --submit
 
 # Or use a manifest for persistent metadata
-mdf manifest init --title "My Dataset" --author "Jane Doe"
+mdf setup                       # interactive: configure defaults + create mdf.yaml
 vim mdf.yaml                    # edit metadata, add data_sources
 mdf publish --submit
 
@@ -31,8 +36,22 @@ mdf status
 # Browse your datasets
 mdf list
 mdf show my_dataset_v1
-mdf versions my_dataset_v1
+mdf dataset versions my_dataset_v1
 ```
+
+## Agent skill
+
+The package bundles a `/mdf-publish` agent skill (folder scan, manifest creation,
+validation, publish) that plugs into Claude, Codex, or Gemini as a slash command.
+
+```bash
+mdf skill install                    # installs for Claude at ~/.claude/skills/
+mdf skill install --agent codex      # or codex / gemini / all
+mdf skill install --project          # into ./.claude/skills/ instead
+```
+
+Then invoke `/mdf-publish` from the target agent. See `src/mdf_agent/skill/skill.md`
+for the full list of handler actions it exposes.
 
 ## CLI commands
 
@@ -42,7 +61,7 @@ mdf versions my_dataset_v1
 mdf login                     # Authenticate via Globus (opens browser)
 mdf login --service staging   # Authenticate against staging
 mdf logout                    # Clear cached tokens
-mdf whoami                    # Show current auth status
+mdf status --auth             # Show current auth status
 ```
 
 ### Publishing datasets
@@ -50,25 +69,40 @@ mdf whoami                    # Show current auth status
 ```bash
 # Direct mode (no manifest needed)
 mdf publish ./data/ --title "My Dataset" --author "Jane" --submit
-mdf publish ./data/ --title "My Dataset" --author "Jane" --dry-run  # Preview payload
+mdf publish ./data/ --title "My Dataset" --author "Jane" --dry-run  # Preview payload (default)
 
 # Manifest mode (mdf.yaml in current directory)
-mdf manifest init --title "Title" --author "Name"   # Create mdf.yaml (interactive if no flags)
-mdf manifest discover *.csv                          # Extract metadata from files into mdf.yaml
-mdf validate                                         # Check manifest
+mdf setup                                            # Create mdf.yaml (interactive)
+mdf config manifest init --title "Title" --author "Name"  # Create mdf.yaml (non-interactive)
+mdf publish --preflight-only                         # Run submit-time checks without submitting
 mdf publish --submit                                 # Submit to MDF
 
 # Update an existing dataset
-mdf update --data ./new_data/ --submit             # Updates last published dataset
-mdf update my_dataset_v1 --title "New" --submit    # Explicit source_id
+mdf publish --update --submit                        # Updates last published dataset
+mdf publish --update --title "New" --submit           # Update with metadata overrides
 ```
 
 ### Manifest management
 
 ```bash
-mdf manifest init                        # Create mdf.yaml (interactive)
-mdf manifest init --title "T" --author "A"  # Create mdf.yaml (non-interactive)
-mdf manifest discover *.csv *.json       # Extract metadata from files into mdf.yaml
+mdf setup                                     # Configure defaults + create mdf.yaml (interactive)
+mdf config manifest init                      # Create mdf.yaml (interactive)
+mdf config manifest init --title "T" --author "A"  # Create mdf.yaml (non-interactive)
+mdf config manifest discover *.csv *.json     # Extract metadata from files into mdf.yaml
+mdf config manifest inspect                   # Show a readable summary of the current manifest
+```
+
+### Dataset utilities
+
+```bash
+mdf dataset cite my_dataset_v1               # Citation (APA, BibTeX, RIS, DataCite)
+mdf dataset open my_dataset_v1               # Open the dataset page in a browser
+mdf dataset preview my_dataset_v1            # File listing / data preview
+mdf dataset versions my_dataset_v1           # Version history table
+mdf dataset diff my_dataset_v1 --from 1.0 --to 2.0  # Metadata diff between versions
+mdf dataset edit my_dataset_v1 --title "New Title"  # Edit metadata on a submission
+mdf dataset withdraw my_dataset_v1           # Withdraw a pending_curation submission
+mdf dataset resubmit my_dataset_v1           # Resubmit a rejected submission
 ```
 
 ### Discoverability
@@ -81,10 +115,9 @@ mdf show my_dataset_v1              # Formatted dataset card
 mdf show my_dataset_v1 --cite       # Include citation
 mdf show my_dataset_v1 --json       # Raw JSON output
 
-mdf versions my_dataset_v1          # Version history table
-
 mdf status                          # Status of last published dataset
 mdf status my_dataset_v1            # Status of specific dataset
+mdf status my_dataset_v1 --watch    # Poll until terminal state
 
 mdf search "perovskite"             # Keyword search across datasets and streams
 mdf search "XRD" --type streams     # Search only streams
@@ -98,11 +131,21 @@ mdf related my_dataset_v1 --limit 5
 ### Curation
 
 ```bash
-mdf pending                                          # List datasets awaiting review
-mdf pending --organization argonne                   # Filter by org
-mdf approve my_dataset_v1                            # Approve for publication
-mdf approve my_dataset_v1 --notes "LGTM"             # With curator notes
-mdf reject my_dataset_v1 --reason "Missing methods"  # Reject with reason
+mdf admin pending                                          # List datasets awaiting review
+mdf admin pending --organization argonne                   # Filter by org
+mdf admin approve my_dataset_v1                            # Approve for publication
+mdf admin approve my_dataset_v1 --notes "LGTM"              # With curator notes
+mdf admin reject my_dataset_v1 --reason "Missing methods"   # Reject with reason
+mdf admin delete my_dataset_v1 --reason "spam"              # Soft-delete a submission
+mdf admin stats                                             # Admin-wide submission statistics
+```
+
+### Importing external datasets
+
+```bash
+mdf import zenodo:12345                    # Preview metadata (dry run)
+mdf import zenodo:12345 --submit           # Download + submit to MDF
+mdf import zenodo:12345 -o ./data --submit # Custom output dir
 ```
 
 ### Streaming (automated labs)
@@ -118,22 +161,21 @@ mdf config set defaults.service staging  # Set default service
 mdf config set user.email me@example.com # Set user email (validated)
 mdf config get defaults.service          # Get a value
 mdf config path                          # Show config file location
+mdf config doctor                        # Diagnose config, auth, connectivity, manifest
 ```
 
-### Backend operations
+### Shortcuts
 
-Low-level backend API commands. All accept `--json` for raw JSON output (useful for scripting).
+A handful of older top-level spellings (`mdf versions`, `mdf pending`, `mdf approve`,
+`mdf reject`, `mdf validate`, `mdf whoami`, `mdf update`, `mdf cite`, `mdf watch`, ...)
+still work as hidden aliases for backward compatibility, but are not shown in `--help`
+and may be removed in a future release. Use the `mdf dataset ...` / `mdf admin ...` /
+`mdf status --auth` / `mdf publish --preflight-only|--update` forms documented above.
 
-```bash
-mdf backend health                         # Health check
-mdf backend status --source-id X           # Submission status
-mdf backend status --source-id X --json    # Raw JSON (for scripts)
-mdf backend submissions                    # List submissions
-mdf backend card my_dataset_v1             # Dataset preview card
-mdf backend cite my_dataset_v1 -f bibtex   # Citation in BibTeX
-mdf backend preview my_dataset_v1          # Dataset preview
-mdf backend search "iron oxide"            # Search
-```
+`mdf backend ...` is also a hidden sub-app exposing low-level backend API calls
+(`health`, `status`, `submissions`, `card`, `cite`, `preview`, `search`, ...) with
+`--json` output for scripting. It's an advanced/debugging escape hatch, not the
+primary interface.
 
 ### Service targeting
 
@@ -254,7 +296,7 @@ The `--by similar` path serves the dataset detail page's "you might also like" w
 
 When a dataset is approved and published, the publish pipeline fires off a `generate_embedding` async job for the new version. If the embed call fails (OpenAI outage, quota), publish still succeeds — the next `rebuild-embeddings` will pick up the gap.
 
-Editing metadata via `mdf edit` or a curator approve with `metadata_updates` bumps `metadata_updated_at`, which makes the skip check treat the existing embedding as stale on the next rebuild.
+Editing metadata via `mdf dataset edit` or a curator approve with `metadata_updates` bumps `metadata_updated_at`, which makes the skip check treat the existing embedding as stale on the next rebuild.
 
 ### Manual rebuild (curator-only)
 
@@ -321,6 +363,17 @@ repository.
 python -m pytest tests/ -v
 
 # Backend tests are run from the sibling connect_server repository.
+```
+
+## Development
+
+```bash
+git clone https://github.com/materials-data-facility/mdf_client
+cd mdf_client
+pip install -e .
+
+# With metadata extractors (PDF, CSV, Excel)
+pip install -e ".[extractors]"
 ```
 
 ## Legacy

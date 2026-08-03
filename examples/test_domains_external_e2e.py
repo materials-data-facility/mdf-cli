@@ -7,10 +7,18 @@ Tests:
       external_source appear in status
   [3] Submit dataset with both domains and external import → verify both
 
+This script submits 3 REAL (pending_curation) records on the shared staging
+environment. It requires explicit opt-in and best-effort withdraws what it
+created when it's done.
+
 Usage:
-    python examples/test_domains_external_e2e.py
+    MDF_E2E_ALLOW_STAGING_WRITES=1 python examples/test_domains_external_e2e.py
+
+    # Skip cleanup (leave the records on staging for manual inspection):
+    MDF_E2E_ALLOW_STAGING_WRITES=1 KEEP=1 python examples/test_domains_external_e2e.py
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -32,139 +40,168 @@ def step(num, title):
     print(f"[{num}] {title}")
 
 
+def _require_opt_in():
+    if os.environ.get("MDF_E2E_ALLOW_STAGING_WRITES") != "1":
+        print(
+            "Refusing to run: this script submits 3 real records to the shared\n"
+            "MDF staging environment (pollutes the staging search index).\n"
+            "Set MDF_E2E_ALLOW_STAGING_WRITES=1 to opt in, e.g.:\n"
+            "  MDF_E2E_ALLOW_STAGING_WRITES=1 python examples/test_domains_external_e2e.py"
+        )
+        sys.exit(1)
+
+
 def main():
+    _require_opt_in()
     heading("MDF v2 Staging E2E — Domains & External Import")
 
     print("Authenticating with Globus...")
     client = BackendClient.authenticated(base_url=STAGING_URL, service_instance="prod")
     print("  Authenticated.\n")
 
-    # ── Step 1: Submit with domains ─────────────────────────────────────
-    step(1, "Submit dataset with domains=['materials', 'chemistry']")
+    created_ids = []
+    try:
+        # ── Step 1: Submit with domains ─────────────────────────────────────
+        step(1, "Submit dataset with domains=['materials', 'chemistry']")
 
-    result1 = client.submit({
-        "title": "Domains E2E Test Dataset",
-        "authors": [
-            {"name": "MDF Test Suite", "given_name": "MDF", "family_name": "Test Suite"},
-        ],
-        "description": "E2E test: domains field.",
-        "keywords": ["test", "e2e", "domains"],
-        "data_sources": ["https://data.materialsdatafacility.org/test/e2e/domains.csv"],
-        "publisher": "Materials Data Facility",
-        "publication_year": 2026,
-        "domains": ["materials", "chemistry"],
-    })
-    if not result1.get("success"):
-        print(f"  FAIL: {result1}")
-        sys.exit(1)
+        result1 = client.submit({
+            "title": "[E2E-TEST] Domains E2E Test Dataset",
+            "authors": [
+                {"name": "MDF Test Suite", "given_name": "MDF", "family_name": "Test Suite"},
+            ],
+            "description": "E2E test: domains field.",
+            "keywords": ["test", "e2e", "domains"],
+            "data_sources": ["https://data.materialsdatafacility.org/test/e2e/domains.csv"],
+            "publisher": "Materials Data Facility",
+            "publication_year": 2026,
+            "domains": ["materials", "chemistry"],
+        })
+        if not result1.get("success"):
+            print(f"  FAIL: {result1}")
+            sys.exit(1)
 
-    sid1 = result1["source_id"]
-    print(f"  Source ID: {sid1}")
-    print(f"  Version:   {result1['version']}")
+        sid1 = result1["source_id"]
+        created_ids.append(sid1)
+        print(f"  Source ID: {sid1}")
+        print(f"  Version:   {result1['version']}")
 
-    status1 = client.status(sid1)
-    sub1 = status1.get("submission", {})
-    mdata1 = sub1.get("dataset_mdata", {})
-    print(f"  Status:  {sub1.get('status')}")
-    print(f"  Domains: {mdata1.get('domains')}")
-    print()
+        status1 = client.status(sid1)
+        sub1 = status1.get("submission", {})
+        mdata1 = sub1.get("dataset_mdata", {})
+        print(f"  Status:  {sub1.get('status')}")
+        print(f"  Domains: {mdata1.get('domains')}")
+        print()
 
-    # ── Step 2: Submit with external import fields ──────────────────────
-    step(2, "Submit externally-imported dataset")
+        # ── Step 2: Submit with external import fields ──────────────────────
+        step(2, "Submit externally-imported dataset")
 
-    result2 = client.submit({
-        "title": "External Import E2E Test Dataset",
-        "authors": [
-            {"name": "MDF Test Suite", "given_name": "MDF", "family_name": "Test Suite"},
-        ],
-        "description": "E2E test: external import from Zenodo.",
-        "keywords": ["test", "e2e", "external-import"],
-        "data_sources": ["https://data.materialsdatafacility.org/test/e2e/external.csv"],
-        "publisher": "Materials Data Facility",
-        "publication_year": 2026,
-        "external_doi": "10.5281/zenodo.1234567",
-        "external_url": "https://zenodo.org/record/1234567",
-        "external_source": "Zenodo",
-    })
-    if not result2.get("success"):
-        print(f"  FAIL: {result2}")
-        sys.exit(1)
+        result2 = client.submit({
+            "title": "[E2E-TEST] External Import E2E Test Dataset",
+            "authors": [
+                {"name": "MDF Test Suite", "given_name": "MDF", "family_name": "Test Suite"},
+            ],
+            "description": "E2E test: external import from Zenodo.",
+            "keywords": ["test", "e2e", "external-import"],
+            "data_sources": ["https://data.materialsdatafacility.org/test/e2e/external.csv"],
+            "publisher": "Materials Data Facility",
+            "publication_year": 2026,
+            "external_doi": "10.5281/zenodo.1234567",
+            "external_url": "https://zenodo.org/record/1234567",
+            "external_source": "Zenodo",
+        })
+        if not result2.get("success"):
+            print(f"  FAIL: {result2}")
+            sys.exit(1)
 
-    sid2 = result2["source_id"]
-    print(f"  Source ID: {sid2}")
-    print(f"  Version:   {result2['version']}")
+        sid2 = result2["source_id"]
+        created_ids.append(sid2)
+        print(f"  Source ID: {sid2}")
+        print(f"  Version:   {result2['version']}")
 
-    status2 = client.status(sid2)
-    sub2 = status2.get("submission", {})
-    mdata2 = sub2.get("dataset_mdata", {})
-    print(f"  Status:          {sub2.get('status')}")
-    print(f"  external_doi:    {mdata2.get('external_doi')}")
-    print(f"  external_url:    {mdata2.get('external_url')}")
-    print(f"  external_source: {mdata2.get('external_source')}")
-    print()
+        status2 = client.status(sid2)
+        sub2 = status2.get("submission", {})
+        mdata2 = sub2.get("dataset_mdata", {})
+        print(f"  Status:          {sub2.get('status')}")
+        print(f"  external_doi:    {mdata2.get('external_doi')}")
+        print(f"  external_url:    {mdata2.get('external_url')}")
+        print(f"  external_source: {mdata2.get('external_source')}")
+        print()
 
-    # ── Step 3: Submit with both domains and external import ────────────
-    step(3, "Submit dataset with both domains and external import")
+        # ── Step 3: Submit with both domains and external import ────────────
+        step(3, "Submit dataset with both domains and external import")
 
-    result3 = client.submit({
-        "title": "Combined Domains + External Import E2E Test",
-        "authors": [
-            {"name": "MDF Test Suite", "given_name": "MDF", "family_name": "Test Suite"},
-        ],
-        "description": "E2E test: both domains and external import fields.",
-        "keywords": ["test", "e2e", "combined"],
-        "data_sources": ["https://data.materialsdatafacility.org/test/e2e/combined.csv"],
-        "publisher": "Materials Data Facility",
-        "publication_year": 2026,
-        "domains": ["biology"],
-        "external_doi": "10.5061/dryad.abc123",
-        "external_url": "https://datadryad.org/stash/dataset/abc123",
-        "external_source": "Dryad",
-    })
-    if not result3.get("success"):
-        print(f"  FAIL: {result3}")
-        sys.exit(1)
+        result3 = client.submit({
+            "title": "[E2E-TEST] Combined Domains + External Import E2E Test",
+            "authors": [
+                {"name": "MDF Test Suite", "given_name": "MDF", "family_name": "Test Suite"},
+            ],
+            "description": "E2E test: both domains and external import fields.",
+            "keywords": ["test", "e2e", "combined"],
+            "data_sources": ["https://data.materialsdatafacility.org/test/e2e/combined.csv"],
+            "publisher": "Materials Data Facility",
+            "publication_year": 2026,
+            "domains": ["biology"],
+            "external_doi": "10.5061/dryad.abc123",
+            "external_url": "https://datadryad.org/stash/dataset/abc123",
+            "external_source": "Dryad",
+        })
+        if not result3.get("success"):
+            print(f"  FAIL: {result3}")
+            sys.exit(1)
 
-    sid3 = result3["source_id"]
-    print(f"  Source ID: {sid3}")
-    print(f"  Version:   {result3['version']}")
+        sid3 = result3["source_id"]
+        created_ids.append(sid3)
+        print(f"  Source ID: {sid3}")
+        print(f"  Version:   {result3['version']}")
 
-    status3 = client.status(sid3)
-    sub3 = status3.get("submission", {})
-    mdata3 = sub3.get("dataset_mdata", {})
-    print(f"  Status:          {sub3.get('status')}")
-    print(f"  Domains:         {mdata3.get('domains')}")
-    print(f"  external_doi:    {mdata3.get('external_doi')}")
-    print(f"  external_url:    {mdata3.get('external_url')}")
-    print(f"  external_source: {mdata3.get('external_source')}")
-    print()
+        status3 = client.status(sid3)
+        sub3 = status3.get("submission", {})
+        mdata3 = sub3.get("dataset_mdata", {})
+        print(f"  Status:          {sub3.get('status')}")
+        print(f"  Domains:         {mdata3.get('domains')}")
+        print(f"  external_doi:    {mdata3.get('external_doi')}")
+        print(f"  external_url:    {mdata3.get('external_url')}")
+        print(f"  external_source: {mdata3.get('external_source')}")
+        print()
 
-    # ── Summary ─────────────────────────────────────────────────────────
-    heading("Assertions")
+        # ── Summary ─────────────────────────────────────────────────────────
+        heading("Assertions")
 
-    checks = [
-        ("Test 1: domains round-trip",
-         mdata1.get("domains") == ["materials", "chemistry"]),
-        ("Test 2: external_doi round-trip",
-         mdata2.get("external_doi") == "10.5281/zenodo.1234567"),
-        ("Test 2: external_url round-trip",
-         mdata2.get("external_url") == "https://zenodo.org/record/1234567"),
-        ("Test 2: external_source round-trip",
-         mdata2.get("external_source") == "Zenodo"),
-        ("Test 3: combined domains",
-         mdata3.get("domains") == ["biology"]),
-        ("Test 3: combined external_doi",
-         mdata3.get("external_doi") == "10.5061/dryad.abc123"),
-        ("Test 3: combined external_source",
-         mdata3.get("external_source") == "Dryad"),
-    ]
+        checks = [
+            ("Test 1: domains round-trip",
+             mdata1.get("domains") == ["materials", "chemistry"]),
+            ("Test 2: external_doi round-trip",
+             mdata2.get("external_doi") == "10.5281/zenodo.1234567"),
+            ("Test 2: external_url round-trip",
+             mdata2.get("external_url") == "https://zenodo.org/record/1234567"),
+            ("Test 2: external_source round-trip",
+             mdata2.get("external_source") == "Zenodo"),
+            ("Test 3: combined domains",
+             mdata3.get("domains") == ["biology"]),
+            ("Test 3: combined external_doi",
+             mdata3.get("external_doi") == "10.5061/dryad.abc123"),
+            ("Test 3: combined external_source",
+             mdata3.get("external_source") == "Dryad"),
+        ]
 
-    for label, passed in checks:
-        mark = "PASS" if passed else "FAIL"
-        print(f"  [{mark}] {label}")
+        for label, passed in checks:
+            mark = "PASS" if passed else "FAIL"
+            print(f"  [{mark}] {label}")
 
-    passed_count = sum(1 for _, p in checks if p)
-    print(f"\n  {passed_count}/{len(checks)} checks passed\n")
+        passed_count = sum(1 for _, p in checks if p)
+        print(f"\n  {passed_count}/{len(checks)} checks passed\n")
+    finally:
+        if os.environ.get("KEEP") == "1":
+            print(f"\nKEEP=1 set — leaving {len(created_ids)} record(s) on staging: {created_ids}")
+        else:
+            print(f"\nCleaning up {len(created_ids)} record(s) created by this run...")
+            for sid in created_ids:
+                try:
+                    result = client.withdraw(sid, reason="E2E test cleanup")
+                    print(f"  Cleanup: withdrew {sid} -> success={result.get('success')}")
+                except Exception as exc:
+                    print(f"  Cleanup WARNING: failed to withdraw {sid}: {exc}")
+        client.close()
 
 
 if __name__ == "__main__":

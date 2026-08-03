@@ -3,10 +3,18 @@
 
 Runs: submit → verify pending_curation → approve (mint_doi=true) → verify published + DOI
 
+This script submits and publishes a REAL record on the shared staging
+environment. It requires explicit opt-in and best-effort cleans up (soft-
+deletes) what it created when it's done.
+
 Usage:
-    python examples/test_staging_e2e.py
+    MDF_E2E_ALLOW_STAGING_WRITES=1 python examples/test_staging_e2e.py
+
+    # Skip cleanup (leave the record on staging for manual inspection):
+    MDF_E2E_ALLOW_STAGING_WRITES=1 KEEP=1 python examples/test_staging_e2e.py
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -24,7 +32,19 @@ def heading(title):
     print(f"{'=' * 60}\n")
 
 
+def _require_opt_in():
+    if os.environ.get("MDF_E2E_ALLOW_STAGING_WRITES") != "1":
+        print(
+            "Refusing to run: this script submits and publishes a real record on\n"
+            "the shared MDF staging environment (pollutes the staging search index).\n"
+            "Set MDF_E2E_ALLOW_STAGING_WRITES=1 to opt in, e.g.:\n"
+            "  MDF_E2E_ALLOW_STAGING_WRITES=1 python examples/test_staging_e2e.py"
+        )
+        sys.exit(1)
+
+
 def main():
+    _require_opt_in()
     heading("MDF v2 Staging E2E — Publication Pipeline")
 
     # Authenticate via Globus (will open browser if needed)
@@ -32,81 +52,96 @@ def main():
     client = BackendClient.authenticated(base_url=STAGING_URL, service_instance="prod")
     print("  Authenticated.\n")
 
-    # Step 1: Health check
-    print("[1] Health check...")
-    health = client._request("GET", "/health")
-    print(f"  {health}\n")
+    created_ids = []
+    try:
+        # Step 1: Health check
+        print("[1] Health check...")
+        health = client._request("GET", "/health")
+        print(f"  {health}\n")
 
-    # Step 2: Submit
-    print("[2] Submitting dataset...")
-    result = client.submit({
-        "title": "E2E Pipeline Test — Real DOI Minting",
-        "authors": [
-            {"name": "MDF Test Suite", "given_name": "MDF", "family_name": "Test Suite", "affiliation": "Materials Data Facility"},
-        ],
-        "description": "Automated E2E test of the v2 publication pipeline with real DataCite DOI minting on staging.",
-        "keywords": ["test", "e2e", "publication-pipeline", "datacite"],
-        "data_sources": ["https://data.materialsdatafacility.org/test/e2e/sample.csv"],
-        "publisher": "Materials Data Facility",
-        "publication_year": 2026,
-        "license": {"name": "CC-BY-4.0", "identifier": "CC-BY-4.0"},
-    })
-    print(f"  Result: {result}")
+        # Step 2: Submit
+        print("[2] Submitting dataset...")
+        result = client.submit({
+            "title": "[E2E-TEST] E2E Pipeline Test — Real DOI Minting",
+            "authors": [
+                {"name": "MDF Test Suite", "given_name": "MDF", "family_name": "Test Suite", "affiliation": "Materials Data Facility"},
+            ],
+            "description": "Automated E2E test of the v2 publication pipeline with real DataCite DOI minting on staging.",
+            "keywords": ["test", "e2e", "publication-pipeline", "datacite"],
+            "data_sources": ["https://data.materialsdatafacility.org/test/e2e/sample.csv"],
+            "publisher": "Materials Data Facility",
+            "publication_year": 2026,
+            "license": {"name": "CC-BY-4.0", "identifier": "CC-BY-4.0"},
+        })
+        print(f"  Result: {result}")
 
-    if not result.get("success"):
-        print(f"\n  Submit failed: {result}")
-        sys.exit(1)
+        if not result.get("success"):
+            print(f"\n  Submit failed: {result}")
+            sys.exit(1)
 
-    source_id = result["source_id"]
-    version = result["version"]
-    print(f"  Source ID: {source_id}")
-    print(f"  Version:  {version}\n")
+        source_id = result["source_id"]
+        created_ids.append(source_id)
+        version = result["version"]
+        print(f"  Source ID: {source_id}")
+        print(f"  Version:  {version}\n")
 
-    # Step 3: Check status — should be pending_curation
-    print("[3] Checking status...")
-    status = client.status(source_id)
-    current_status = status.get("submission", {}).get("status")
-    print(f"  Status: {current_status}")
-    assert current_status == "pending_curation", f"Expected pending_curation, got {current_status}"
-    print("  OK: status is pending_curation\n")
+        # Step 3: Check status — should be pending_curation
+        print("[3] Checking status...")
+        status = client.status(source_id)
+        current_status = status.get("submission", {}).get("status")
+        print(f"  Status: {current_status}")
+        assert current_status == "pending_curation", f"Expected pending_curation, got {current_status}"
+        print("  OK: status is pending_curation\n")
 
-    # Step 4: Approve with DOI minting
-    print("[4] Approving submission (mint_doi=true)...")
-    approve_result = client._request("POST", f"/curation/{source_id}/approve", json_data={
-        "mint_doi": True,
-        "notes": "Automated E2E test approval",
-    })
-    print(f"  Result: {approve_result}\n")
+        # Step 4: Approve with DOI minting
+        print("[4] Approving submission (mint_doi=true)...")
+        approve_result = client._request("POST", f"/curation/{source_id}/approve", json_data={
+            "mint_doi": True,
+            "notes": "Automated E2E test approval",
+        })
+        print(f"  Result: {approve_result}\n")
 
-    # Step 5: Check final status — should be published with DOI
-    print("[5] Checking final status...")
-    final_status = client.status(source_id)
-    submission = final_status.get("submission", {})
-    print(f"  Status:       {submission.get('status')}")
-    print(f"  DOI:          {submission.get('doi')}")
-    print(f"  Published at: {submission.get('published_at')}")
+        # Step 5: Check final status — should be published with DOI
+        print("[5] Checking final status...")
+        final_status = client.status(source_id)
+        submission = final_status.get("submission", {})
+        print(f"  Status:       {submission.get('status')}")
+        print(f"  DOI:          {submission.get('doi')}")
+        print(f"  Published at: {submission.get('published_at')}")
 
-    # Step 6: Get citation
-    print("\n[6] Getting citation...")
-    citation = client.get_citation(source_id, format="bibtex")
-    if citation.get("success"):
-        print(f"  BibTeX:\n    {citation.get('bibtex', 'N/A')[:200]}")
-    else:
-        print(f"  Citation: {citation}")
+        # Step 6: Get citation
+        print("\n[6] Getting citation...")
+        citation = client.get_citation(source_id, format="bibtex")
+        if citation.get("success"):
+            print(f"  BibTeX:\n    {citation.get('bibtex', 'N/A')[:200]}")
+        else:
+            print(f"  Citation: {citation}")
 
-    # Step 7: Search
-    print("\n[7] Searching for dataset...")
-    search = client.search("E2E Pipeline Test")
-    print(f"  Total results: {search.get('total', 0)}")
-    for r in search.get("results", [])[:3]:
-        print(f"    - {r.get('title')} (status: {r.get('status')})")
+        # Step 7: Search
+        print("\n[7] Searching for dataset...")
+        search = client.search("E2E Pipeline Test")
+        print(f"  Total results: {search.get('total', 0)}")
+        for r in search.get("results", [])[:3]:
+            print(f"    - {r.get('title')} (status: {r.get('status')})")
 
-    heading("Summary")
-    print(f"  Source ID:  {source_id}")
-    print(f"  Status:     {submission.get('status')}")
-    print(f"  DOI:        {submission.get('doi')}")
-    print(f"  Published:  {submission.get('published_at')}")
-    print()
+        heading("Summary")
+        print(f"  Source ID:  {source_id}")
+        print(f"  Status:     {submission.get('status')}")
+        print(f"  DOI:        {submission.get('doi')}")
+        print(f"  Published:  {submission.get('published_at')}")
+        print()
+    finally:
+        if os.environ.get("KEEP") == "1":
+            print(f"\nKEEP=1 set — leaving {len(created_ids)} record(s) on staging: {created_ids}")
+        else:
+            print(f"\nCleaning up {len(created_ids)} record(s) created by this run...")
+            for sid in created_ids:
+                try:
+                    del_result = client.delete_submission(sid, reason="E2E test cleanup")
+                    print(f"  Cleanup: deleted {sid} -> success={del_result.get('success')}")
+                except Exception as exc:
+                    print(f"  Cleanup WARNING: failed to delete {sid}: {exc}")
+        client.close()
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ from mdf_agent.cli.formatting import (
     api_spinner,
     console,
     format_status_badge,
+    is_success,
     json_or_rich,
     read_client,
     require_success,
@@ -1529,13 +1530,13 @@ def related(
 
     if by == "similar" and result.get("available") is False:
         reason = result.get("reason") or "Embedding snapshot unavailable."
-        console.print(f"\n[yellow]{reason}[/yellow]")
+        console.print(f"\n[yellow]{escape(str(reason))}[/yellow]")
         return
 
     results = result.get("results", [])
     if not results:
         if by == "similar" and result.get("reason"):
-            console.print(f"\n[yellow]{result['reason']}[/yellow]")
+            console.print(f"\n[yellow]{escape(str(result['reason']))}[/yellow]")
         else:
             console.print(
                 f"\n[dim]No related datasets found for[/dim] [cyan]{resolved_id}[/cyan]"
@@ -1557,11 +1558,11 @@ def related(
             score = row.get("score")
             score_str = f"{float(score):.3f}" if score is not None else ""
             table.add_row(
-                row.get("source_id", ""),
-                row.get("title") or "Untitled",
+                escape(str(row.get("source_id", ""))),
+                escape(str(row.get("title") or "Untitled")),
                 score_str,
-                str(row.get("publication_year") or ""),
-                row.get("doi") or "",
+                escape(str(row.get("publication_year") or "")),
+                escape(str(row.get("doi") or "")),
             )
         console.print(table)
         return
@@ -1578,11 +1579,11 @@ def related(
     table.add_column("DOI", style="dim", max_width=24)
     for row in results:
         table.add_row(
-            row.get("source_id", ""),
-            row.get("title") or "Untitled",
-            str(row.get("shared_authors") or ""),
-            str(row.get("publication_year") or ""),
-            row.get("doi") or "",
+            escape(str(row.get("source_id", ""))),
+            escape(str(row.get("title") or "Untitled")),
+            escape(str(row.get("shared_authors") or "")),
+            escape(str(row.get("publication_year") or "")),
+            escape(str(row.get("doi") or "")),
         )
     console.print(table)
 
@@ -1613,7 +1614,7 @@ def show(
     with api_spinner("Loading dataset..."):
         result = client.get_card(source_id, version=version)
         citation_result = None
-        if cite and result.get("success"):
+        if cite and is_success(result):
             citation_result = client.get_citation(source_id, format="apa", version=version)
     client.close()
 
@@ -1624,7 +1625,7 @@ def show(
         print(json.dumps(output, indent=2))
         return
 
-    if not result.get("success"):
+    if not is_success(result):
         require_success(result, error_prefix="Show failed")
 
     c = result.get("card", {})
@@ -1670,7 +1671,7 @@ def show(
     if stats:
         console.print(f"\n[dim]Files:[/dim] {stats.get('data_sources_count', 0)} sources | Types: {', '.join(stats.get('file_types', []))}")
 
-    if citation_result and citation_result.get("success"):
+    if citation_result and is_success(citation_result):
         apa = citation_result.get("apa", "")
         if apa:
             console.print(f"\n[bold]Citation:[/bold]\n  {apa}")
@@ -2113,7 +2114,7 @@ def update_alias(
             resolved_source_id = _resolve_identifier_with_notice(_client, resolved_source_id)
             with api_spinner("Fetching existing metadata..."):
                 card = _client.get_card(resolved_source_id)
-            if card.get("success") and card.get("card"):
+            if is_success(card) and card.get("card"):
                 c = card["card"]
                 existing_title = c.get("title", resolved_source_id)
                 existing_authors = c.get("authors", [])

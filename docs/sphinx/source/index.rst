@@ -3,6 +3,15 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
+.. attention::
+   **These Sphinx docs cover the legacy v1 MDF Connect Client** (the
+   ``mdf_forge`` / ``mdf_connect_client`` packages preserved under ``legacy/``).
+   They are not maintained for the current release.
+
+   For the current ``mdf-agent`` CLI, Python SDK, and agent skill, see the
+   `root README <https://github.com/materials-data-facility/mdf_client#readme>`_
+   instead.
+
 
 Index
 =====

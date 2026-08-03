@@ -18,6 +18,28 @@ _V2_API_URLS = {
 }
 
 
+class ApiResult(dict):
+    """A response body that also remembers the HTTP status it arrived with.
+
+    ``BackendClient._request`` historically returned the decoded JSON body and
+    threw the status code away, which forced callers to guess at failure by
+    substring-matching error text. ``ApiResult`` is a plain ``dict`` subclass, so
+    every existing call site (``result["files"]``, ``result.get("success")``,
+    ``json.dumps(result)``) keeps working unchanged and the status never leaks
+    into ``--json`` output — but ``result.status_code`` is available to code that
+    wants to classify outcomes properly.
+
+    ``status_code`` is ``None`` for results synthesized client-side (connection
+    failures, retry exhaustion), i.e. when no HTTP response was ever received.
+    """
+
+    __slots__ = ("status_code",)
+
+    def __init__(self, data: Optional[Dict[str, Any]] = None, status_code: Optional[int] = None):
+        super().__init__(data or {})
+        self.status_code = status_code
+
+
 def _api_url_for_service(service_instance: Optional[str] = None) -> str:
     override_url = os.environ.get("MDF_API_URL")
     if override_url:
@@ -754,24 +776,24 @@ class BackendClient:
             except httpx.ConnectError as exc:
                 last_exc = exc
                 if self.base_url == _V2_API_URLS["prod"]:
-                    return {
+                    return ApiResult({
                         "success": False,
                         "error": (
                             f"Cannot connect to the production MDF API at {self.base_url}. "
                             "The production service is not available yet; set "
                             "MDF_SERVICE=staging and retry."
                         ),
-                    }
+                    })
                 if attempt < self._MAX_RETRIES:
                     time.sleep(2 ** attempt)
                     continue
-                return {"success": False, "error": f"Connection failed after {self._MAX_RETRIES + 1} attempts: {exc}"}
+                return ApiResult({"success": False, "error": f"Connection failed after {self._MAX_RETRIES + 1} attempts: {exc}"})
             except httpx.ConnectTimeout as exc:
                 last_exc = exc
                 if attempt < self._MAX_RETRIES:
                     time.sleep(2 ** attempt)
                     continue
-                return {"success": False, "error": f"Connection failed after {self._MAX_RETRIES + 1} attempts: {exc}"}
+                return ApiResult({"success": False, "error": f"Connection failed after {self._MAX_RETRIES + 1} attempts: {exc}"})
 
             if response.status_code in self._RETRY_STATUSES and attempt < self._MAX_RETRIES:
                 retry_after = response.headers.get("Retry-After")
@@ -785,16 +807,30 @@ class BackendClient:
                 time.sleep(delay)
                 continue
 
+            status_code = getattr(response, "status_code", None)
             try:
                 payload = response.json()
             except Exception:
-                return {"success": False, "error": f"Invalid response: {response.text}"}
+                return ApiResult(
+                    {"success": False, "error": f"Invalid response: {response.text}"},
+                    status_code=status_code,
+                )
 
             if isinstance(payload, dict) and "body" in payload and isinstance(payload["body"], str):
+                # API-Gateway-style proxy envelope: the real status lives inside.
+                inner_status = payload.get("statusCode") or payload.get("status_code")
+                if isinstance(inner_status, (int, str)):
+                    try:
+                        status_code = int(inner_status)
+                    except (TypeError, ValueError):
+                        pass
                 try:
-                    return json.loads(payload["body"])
+                    inner = json.loads(payload["body"])
                 except Exception:
-                    return payload
+                    return ApiResult(payload, status_code=status_code)
+                return ApiResult(inner, status_code=status_code) if isinstance(inner, dict) else inner
+            if isinstance(payload, dict):
+                return ApiResult(payload, status_code=status_code)
             return payload
 
-        return {"success": False, "error": f"Request failed after {self._MAX_RETRIES + 1} attempts"}
+        return ApiResult({"success": False, "error": f"Request failed after {self._MAX_RETRIES + 1} attempts"})

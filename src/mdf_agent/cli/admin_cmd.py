@@ -7,6 +7,7 @@ import sys
 from typing import Optional
 
 import typer
+from rich.markup import escape
 
 from mdf_agent.core.backend_client import BackendClient
 from mdf_agent.core.config import resolve_service
@@ -14,6 +15,7 @@ from mdf_agent.cli.formatting import (
     api_spinner,
     console,
     format_status_badge,
+    is_success,
     require_success,
 )
 from mdf_agent.cli.preflight import resolve_dataset_identifier
@@ -80,10 +82,10 @@ def pending(
     for i, sub in enumerate(submissions, 1):
         table.add_row(
             str(i),
-            sub.get("source_id", ""),
-            sub.get("title") or "Untitled",
-            sub.get("version", ""),
-            (sub.get("submitted_at") or sub.get("created_at") or "")[:19],
+            escape(str(sub.get("source_id", ""))),
+            escape(str(sub.get("title") or "Untitled")),
+            escape(str(sub.get("version", ""))),
+            escape(str(sub.get("submitted_at") or sub.get("created_at") or "")[:19]),
         )
     console.print(table)
 
@@ -129,11 +131,11 @@ def approve(
 
     if json_output:
         print(json.dumps(result, indent=2))
-        if not result.get("success"):
+        if not is_success(result):
             raise typer.Exit(code=1)
         return
 
-    if result.get("success"):
+    if is_success(result):
         console.print(f"\n[bold green]Approved:[/bold green] [cyan]{source_id}[/cyan]")
         if result.get("doi"):
             console.print(f"  [dim]DOI:[/dim] https://doi.org/{result.get('doi')}")
@@ -181,11 +183,11 @@ def reject(
 
     if json_output:
         print(json.dumps(result, indent=2))
-        if not result.get("success"):
+        if not is_success(result):
             raise typer.Exit(code=1)
         return
 
-    if result.get("success"):
+    if is_success(result):
         console.print(f"\n[bold yellow]Rejected:[/bold yellow] [cyan]{source_id}[/cyan]")
         console.print(f"  [dim]Reason:[/dim] {reason}")
     else:
@@ -226,11 +228,11 @@ def delete_dataset(
 
     if json_output:
         print(json.dumps(result, indent=2))
-        if not result.get("success"):
+        if not is_success(result):
             raise typer.Exit(code=1)
         return
 
-    if result.get("success"):
+    if is_success(result):
         console.print(f"\n[bold red]Deleted:[/bold red] [cyan]{source_id}[/cyan]")
         console.print(f"  [dim]Reason:[/dim] {reason}")
     else:
@@ -266,11 +268,11 @@ def stats(
 
     if json_output:
         print(json.dumps(result, indent=2))
-        if not result.get("success"):
+        if not is_success(result):
             raise typer.Exit(code=1)
         return
 
-    if not result.get("success"):
+    if not is_success(result):
         require_success(result, error_prefix="Stats failed")
 
     console.print(f"\n[bold]Admin Statistics[/bold]\n")
@@ -319,11 +321,11 @@ def embedding_status(
 
     if json_output:
         print(json.dumps(result, indent=2))
-        if not result.get("success"):
+        if not is_success(result):
             raise typer.Exit(code=1)
         return
 
-    if not result.get("success"):
+    if not is_success(result):
         require_success(result, error_prefix="Embedding status failed")
 
     console.print("\n[bold]Embedding coverage[/bold]")
@@ -401,11 +403,11 @@ def rebuild_embeddings(
 
     if json_output:
         print(json.dumps(result, indent=2))
-        if not result.get("success"):
+        if not is_success(result):
             raise typer.Exit(code=1)
         return
 
-    if not result.get("success"):
+    if not is_success(result):
         require_success(result, error_prefix="Rebuild failed")
 
     console.print("\n[bold green]Rebuild dispatched[/bold green]")

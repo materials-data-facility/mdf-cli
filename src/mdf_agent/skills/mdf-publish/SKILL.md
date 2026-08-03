@@ -241,8 +241,10 @@ Two ways to apply the improvements — pick based on what changed:
 
 The server's editable-field allowlist is: `title`, `authors`, `description`, `keywords`,
 `license`, `funding`, `related_works`, `methods`, `facility`, `fields_of_science`,
-`domains`, `ml`, `geo_locations`, `tags`, `extensions`. **Not editable:** `publisher`,
-`publication_year`, `data_sources`. Do not promise the user you can change those.
+`domains`, `ml`, `geo_locations`, `tags`, `extensions`, `external`, `download_url`,
+`data_sources`, `publisher`, `publication_year`. **Not editable:** `resource_type`,
+`organization`, `acl`, and the version fields. Do not promise the user you can change
+those.
 
 Editing a published record auto-bumps a minor version, and the result flows back through
 curation. Say so before Gate #2.

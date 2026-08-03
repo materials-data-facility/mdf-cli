@@ -7,6 +7,7 @@ import webbrowser
 from typing import List, Optional
 
 import typer
+from rich.markup import escape
 
 from mdf_agent.core.backend_client import BackendClient
 from mdf_agent.core.config import resolve_service
@@ -14,8 +15,10 @@ from mdf_agent.cli.formatting import (
     api_spinner,
     console,
     format_status_badge,
+    is_success,
     read_client,
     require_success,
+    status_code_of,
 )
 from mdf_agent.cli.preflight import resolve_dataset_identifier
 
@@ -91,11 +94,11 @@ def cite(
 
     if json_output:
         print(json.dumps(result, indent=2))
-        if not result.get("success"):
+        if not is_success(result):
             raise typer.Exit(code=1)
         return
 
-    if not result.get("success"):
+    if not is_success(result):
         require_success(result, error_prefix="Citation failed")
 
     citation_text = result.get(format) or result.get("apa", "")
@@ -138,7 +141,7 @@ def open_dataset(
         result = client.get_card(source_id, version=version)
     client.close()
 
-    if not result.get("success"):
+    if not is_success(result):
         require_success(result, error_prefix="Open failed")
 
     card = result.get("card", {})
@@ -185,13 +188,32 @@ def preview(
             result = client.dataset_preview(source_id)
     client.close()
 
+    # A missing profile is an expected state, not a failure: most migrated
+    # records have no generated profile yet, so the API 404s with "No profile
+    # found". Only that specific 404 is friendly — a 404 for a nonexistent
+    # dataset (typo'd source_id) must keep normal error handling.
+    _payload_text = str(result.get("detail") or result.get("error") or "").lower()
+    if status_code_of(result) == 404 and "profile" in _payload_text:
+        if json_output:
+            print(json.dumps(result, indent=2))
+            return
+        console.print(
+            "\n[yellow]No file profile exists for this dataset[/yellow] "
+            "[dim](profiles are not yet generated for migrated records).[/dim]"
+        )
+        console.print(
+            f"[dim]Try:[/dim] [cyan]mdf show {source_id}[/cyan] [dim]for metadata, or[/dim] "
+            f"[cyan]mdf clone {source_id}[/cyan] [dim]to download.[/dim]"
+        )
+        return
+
     if json_output:
         print(json.dumps(result, indent=2))
-        if not result.get("success", True):
+        if not is_success(result):
             raise typer.Exit(code=1)
         return
 
-    if not result.get("success", True):
+    if not is_success(result):
         require_success(result, error_prefix="Preview failed")
 
     if sample:
@@ -234,7 +256,7 @@ def preview(
             else:
                 size = str(size) if size else ""
             ftype = f.get("mime_type") or f.get("type") or ""
-            table.add_row(name, str(size), ftype)
+            table.add_row(escape(str(name)), escape(str(size)), escape(str(ftype)))
         console.print(table)
 
 
@@ -267,8 +289,9 @@ def versions(
         print(json.dumps(result, indent=2))
         return
 
-    if not result.get("success"):
-        console.print(f"[yellow]{result.get('error', 'No versions found')}[/yellow]")
+    if not is_success(result):
+        message = result.get("error") or result.get("detail") or "No versions found"
+        console.print(f"[yellow]{escape(str(message))}[/yellow]")
         return
 
     version_list = result.get("versions", [])
@@ -290,11 +313,11 @@ def versions(
         if doi:
             doi = f"https://doi.org/{doi}"
         table.add_row(
-            v.get("version", ""),
-            v.get("title", ""),
+            escape(str(v.get("version", ""))),
+            escape(str(v.get("title", ""))),
             format_status_badge(v.get("status", "")),
-            doi,
-            (v.get("updated_at") or v.get("created_at") or "")[:19],
+            escape(str(doi)),
+            escape(str(v.get("updated_at") or v.get("created_at") or "")[:19]),
         )
     console.print(table)
 
@@ -332,11 +355,11 @@ def diff(
 
     if json_output:
         print(json.dumps(result, indent=2))
-        if not result.get("success"):
+        if not is_success(result):
             raise typer.Exit(code=1)
         return
 
-    if not result.get("success"):
+    if not is_success(result):
         require_success(result, error_prefix="Diff failed")
 
     d = result.get("diff", {})
@@ -412,11 +435,11 @@ def edit(
 
     if json_output:
         print(json.dumps(result, indent=2))
-        if not result.get("success"):
+        if not is_success(result):
             raise typer.Exit(code=1)
         return
 
-    if result.get("success"):
+    if is_success(result):
         console.print(f"\n[bold green]Metadata updated:[/bold green] [cyan]{source_id}[/cyan]")
         if result.get("updated_fields"):
             console.print(f"  [dim]Fields:[/dim] {', '.join(result['updated_fields'])}")
@@ -462,11 +485,11 @@ def withdraw(
 
     if json_output:
         print(json.dumps(result, indent=2))
-        if not result.get("success"):
+        if not is_success(result):
             raise typer.Exit(code=1)
         return
 
-    if result.get("success"):
+    if is_success(result):
         console.print(f"\n[bold yellow]Withdrawn:[/bold yellow] [cyan]{source_id}[/cyan]")
     else:
         require_success(result, error_prefix="Withdraw failed")
@@ -502,11 +525,11 @@ def resubmit(
 
     if json_output:
         print(json.dumps(result, indent=2))
-        if not result.get("success"):
+        if not is_success(result):
             raise typer.Exit(code=1)
         return
 
-    if result.get("success"):
+    if is_success(result):
         console.print(f"\n[bold green]Resubmitted:[/bold green] [cyan]{source_id}[/cyan]")
         console.print(f"  [dim]Status:[/dim] {format_status_badge('pending_curation')}")
     else:

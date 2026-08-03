@@ -10,11 +10,19 @@ Characterizes the versioning lifecycle:
   [6] Query DataCite test API for the DOI — check metadata
   [7] Print summary
 
+WARNING: this script publishes 3 versions of a real record on the shared MDF
+staging environment and does NOT clean them up. Deleting mid-test would
+interfere with the version-history assertions this script exists to check,
+and soft-deleting after the fact would remove version history that's useful
+to inspect by hand. Every submission's title is tagged "[E2E-TEST]" so the
+staging purge tool can find and remove it later.
+
 Usage:
-    python examples/test_versioning_e2e.py
+    MDF_E2E_ALLOW_STAGING_WRITES=1 python examples/test_versioning_e2e.py
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 from urllib.parse import quote
@@ -38,6 +46,18 @@ def heading(title):
 
 def step(num, title):
     print(f"[{num}] {title}")
+
+
+def _require_opt_in():
+    if os.environ.get("MDF_E2E_ALLOW_STAGING_WRITES") != "1":
+        print(
+            "Refusing to run: this script publishes 3 versions of a real record\n"
+            "on the shared MDF staging environment and leaves them there\n"
+            "(no automated cleanup — see the module docstring for why).\n"
+            "Set MDF_E2E_ALLOW_STAGING_WRITES=1 to opt in, e.g.:\n"
+            "  MDF_E2E_ALLOW_STAGING_WRITES=1 python examples/test_versioning_e2e.py"
+        )
+        sys.exit(1)
 
 
 def check_datacite(doi):
@@ -65,7 +85,12 @@ def check_datacite(doi):
 
 
 def main():
+    _require_opt_in()
     heading("MDF v2 Staging E2E — Dataset Versioning")
+    print(
+        "WARNING: this run leaves published records on staging — no automated\n"
+        "cleanup is attempted. All submissions are tagged [E2E-TEST].\n"
+    )
 
     print("Authenticating with Globus...")
     client = BackendClient.authenticated(base_url=STAGING_URL, service_instance="prod")
@@ -75,7 +100,7 @@ def main():
     step(1, "Submit v1.0 → approve with mint_doi=True")
 
     result = client.submit({
-        "title": "Versioning E2E Test Dataset",
+        "title": "[E2E-TEST] Versioning E2E Test Dataset",
         "authors": [
             {"name": "Test Author v1.0", "given_name": "Test", "family_name": "Author v1.0"},
         ],
@@ -113,7 +138,7 @@ def main():
     step(2, "Submit v1.1 (update=True) → approve with mint_doi=False")
 
     result2 = client.submit({
-        "title": "Versioning E2E Test Dataset — Updated",
+        "title": "[E2E-TEST] Versioning E2E Test Dataset — Updated",
         "authors": [
             {"name": "Test Author v1.1", "given_name": "Test", "family_name": "Author v1.1"},
         ],
@@ -150,7 +175,7 @@ def main():
     step(3, "Submit v1.2 (update=True) → approve with mint_doi=True")
 
     result3 = client.submit({
-        "title": "Versioning E2E Test Dataset — v1.2 Release",
+        "title": "[E2E-TEST] Versioning E2E Test Dataset — v1.2 Release",
         "authors": [
             {"name": "Test Author v1.2", "given_name": "Test", "family_name": "Author v1.2"},
             {"name": "New Collaborator", "given_name": "New", "family_name": "Collaborator"},
@@ -271,6 +296,12 @@ def main():
     passed_count = sum(1 for _, p in checks if p)
     print(f"  {passed_count}/{len(checks)} checks passed")
     print()
+
+    print(
+        f"NOTE: source_id {source_id} (3 versions) was left on staging — "
+        "tagged [E2E-TEST] for the periodic purge tool. Delete manually with:\n"
+        f"  mdf admin delete {source_id} --reason \"E2E versioning test cleanup\""
+    )
 
 
 if __name__ == "__main__":
