@@ -533,7 +533,7 @@ bootstrap_project(
   resources: [
     { uri: "https://materialsdatafacility.org", kind: "ENDPOINT", role: "TOOL",
       summary: "The Materials Data Facility — where every expedition dataset lands." },
-    { uri: "https://github.com/materials-data-facility/mdf_client", kind: "CODE_REPO", role: "TOOL",
+    { uri: "https://github.com/materials-data-facility/mdf-cli", kind: "CODE_REPO", role: "TOOL",
       summary: "mdf CLI + the /mdf-publish agent skill — the publishing on-ramp." }
   ],
   handoff: { worksNow: "Charter, quality bar, and authorship policy pages are up.",

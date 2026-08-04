@@ -368,7 +368,7 @@ python -m pytest tests/ -v
 ## Development
 
 ```bash
-git clone https://github.com/materials-data-facility/mdf_client
+git clone https://github.com/materials-data-facility/mdf-cli
 cd mdf_client
 pip install -e .
 
