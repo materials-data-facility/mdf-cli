@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from mdf_agent.core.agent import MDFAgent
-from mdf_agent.skill import handlers as skill_handlers
+from mdf.core.agent import MDFAgent
+from mdf.skill import handlers as skill_handlers
 
 
 class _FakeClient:
@@ -56,7 +56,7 @@ def test_agent_publish_uses_authenticated_client(monkeypatch):
 
     agent = MDFAgent()
     monkeypatch.setattr(agent, "build_submission", lambda test=False, update=False: {"title": "x"})
-    monkeypatch.setattr("mdf_agent.core.agent.BackendClient.authenticated", fake_authenticated)
+    monkeypatch.setattr("mdf.core.agent.BackendClient.authenticated", fake_authenticated)
 
     result = agent.publish(
         dry_run=False,
@@ -88,7 +88,7 @@ def test_agent_publish_legacy_authorizer_extracts_token(monkeypatch):
 
     agent = MDFAgent()
     monkeypatch.setattr(agent, "build_submission", lambda test=False, update=False: {"title": "x"})
-    monkeypatch.setattr("mdf_agent.core.agent.BackendClient.authenticated", fake_authenticated)
+    monkeypatch.setattr("mdf.core.agent.BackendClient.authenticated", fake_authenticated)
 
     result = agent.publish(dry_run=False, authorizer=_DummyAuthorizer())
     assert result["success"] is True
@@ -110,7 +110,7 @@ def test_agent_stream_helpers_use_authenticated_client(monkeypatch):
         )
         return fake_client
 
-    monkeypatch.setattr("mdf_agent.core.agent.BackendClient.authenticated", fake_authenticated)
+    monkeypatch.setattr("mdf.core.agent.BackendClient.authenticated", fake_authenticated)
     agent = MDFAgent()
 
     agent.stream_create("title", api_url="http://localhost", token="t", service_instance="local", dev_user_id="u")
@@ -136,7 +136,7 @@ def test_skill_stream_handlers_use_authenticated_client(monkeypatch):
         )
         return fake_client
 
-    monkeypatch.setattr("mdf_agent.skill.handlers.BackendClient.authenticated", fake_authenticated)
+    monkeypatch.setattr("mdf.skill.handlers.BackendClient.authenticated", fake_authenticated)
     result = skill_handlers.stream_create(
         "title",
         api_url="https://api.example",

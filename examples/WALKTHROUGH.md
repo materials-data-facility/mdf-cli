@@ -191,7 +191,7 @@ You're using Claude Code and want to publish XRD data with zero manual work.
 
 ```python
 # Claude uses the MDF Agent skill handlers
-from mdf_agent.skill.handlers import scan_folder, create_manifest, validate_and_preview
+from mdf.skill.handlers import scan_folder, create_manifest, validate_and_preview
 
 # Step 1: Scan and understand the data
 metadata = scan_folder("examples/xrd-patterns")
@@ -255,7 +255,7 @@ result = validate_and_preview("examples/xrd-patterns")
 **Claude:**
 ```python
 # Step 4: Publish
-from mdf_agent.skill.handlers import publish
+from mdf.skill.handlers import publish
 
 result = publish(
     path="examples/xrd-patterns",

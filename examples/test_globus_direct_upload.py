@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import httpx
-from mdf_agent.auth.globus import (
+from mdf.auth.globus import (
     DATA_MDF_SCOPE,
     MDF_CONNECT_SCOPE,
     NCSA_MDF_COLLECTION_UUID,
@@ -42,7 +42,7 @@ def main():
     data_auth = authorizers.get(NCSA_MDF_COLLECTION_UUID)
     if not data_auth:
         print("   ERROR: No authorizer for data.materialsdatafacility.org")
-        print("   Try: rm ~/.config/mdf_agent/tokens.json && mdf login --service prod")
+        print("   Try: rm ~/.config/mdf/tokens.json && mdf login --service prod")
         sys.exit(1)
 
     data_token = extract_token(data_auth)

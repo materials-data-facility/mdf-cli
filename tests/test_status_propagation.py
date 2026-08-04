@@ -11,13 +11,13 @@ from typing import Any, Dict, Optional
 
 from typer.testing import CliRunner
 
-from mdf_agent.cli.formatting import (
+from mdf.cli.formatting import (
     handle_api_result,
     is_success,
     status_code_of,
 )
-from mdf_agent.cli.main import app
-from mdf_agent.core.backend_client import ApiResult, BackendClient
+from mdf.cli.main import app
+from mdf.core.backend_client import ApiResult, BackendClient
 
 runner = CliRunner()
 
@@ -211,7 +211,7 @@ class _FakePreviewClient:
 
 def _patch_preview(monkeypatch, result) -> None:
     monkeypatch.setattr(
-        "mdf_agent.cli.dataset_cmd.read_client",
+        "mdf.cli.dataset_cmd.read_client",
         lambda **kwargs: _FakePreviewClient(result),
     )
 
@@ -287,7 +287,7 @@ def test_versions_escapes_title_markup(monkeypatch):
                 status_code=200,
             )
 
-    monkeypatch.setattr("mdf_agent.cli.dataset_cmd.read_client", lambda **kwargs: FakeClient())
+    monkeypatch.setattr("mdf.cli.dataset_cmd.read_client", lambda **kwargs: FakeClient())
     result = runner.invoke(app, ["dataset", "versions", "src-1"])
     assert result.exit_code == 0
     assert MARKUP_TITLE in result.stdout
@@ -307,7 +307,7 @@ def test_related_escapes_title_markup(monkeypatch):
                 status_code=200,
             )
 
-    monkeypatch.setattr("mdf_agent.cli.main.read_client", lambda **kwargs: FakeClient())
+    monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: FakeClient())
     result = runner.invoke(app, ["related", "src-1"])
     assert result.exit_code == 0
     assert MARKUP_TITLE in result.stdout
@@ -325,7 +325,7 @@ def test_admin_pending_escapes_title_markup(monkeypatch):
             )
 
     monkeypatch.setattr(
-        "mdf_agent.cli.admin_cmd.BackendClient.authenticated", lambda **kwargs: FakeClient()
+        "mdf.cli.admin_cmd.BackendClient.authenticated", lambda **kwargs: FakeClient()
     )
     result = runner.invoke(app, ["admin", "pending"])
     assert result.exit_code == 0

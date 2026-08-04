@@ -7,9 +7,9 @@ import pytest
 
 from typer.testing import CliRunner
 
-from mdf_agent.cli.main import app
-from mdf_agent.cli import skill_cmd
-from mdf_agent.cli.skill_cmd import BUNDLED_SKILLS, _bundle_path
+from mdf.cli.main import app
+from mdf.cli import skill_cmd
+from mdf.cli.skill_cmd import BUNDLED_SKILLS, _bundle_path
 
 runner = CliRunner()
 

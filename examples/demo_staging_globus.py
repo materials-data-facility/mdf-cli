@@ -33,7 +33,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from mdf_agent.core.backend_client import BackendClient
+from mdf.core.backend_client import BackendClient
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -178,7 +178,7 @@ def demo_publish(client: BackendClient) -> str:
         (work_dir / "calculations.csv").write_text(SAMPLE_CSV)
         (work_dir / "parameters.json").write_text(PARAMS_JSON)
 
-        from mdf_agent.core.agent import MDFAgent
+        from mdf.core.agent import MDFAgent
 
         # Init
         step(f"mdf init (in {work_dir.name})")

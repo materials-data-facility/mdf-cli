@@ -21,7 +21,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from mdf_agent.core.backend_client import BackendClient
+from mdf.core.backend_client import BackendClient
 
 STAGING_URL = "https://3xicgt0g7l.execute-api.us-east-1.amazonaws.com/staging"
 

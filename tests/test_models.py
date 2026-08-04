@@ -3,9 +3,9 @@
 import pytest
 from datetime import datetime
 
-from mdf_agent.models.config import Author, DataSource, DerivedFrom, ManifestConfig
-from mdf_agent.models.datacite import DataCite, Creator, Title, Description
-from mdf_agent.models.submission import Submission
+from mdf.models.config import Author, DataSource, DerivedFrom, ManifestConfig
+from mdf.models.datacite import DataCite, Creator, Title, Description
+from mdf.models.submission import Submission
 
 
 class TestAuthor:
@@ -747,7 +747,7 @@ class TestRichMetadataPassThrough:
         from pathlib import Path
         from tempfile import TemporaryDirectory
 
-        from mdf_agent.core.submission import build_submission
+        from mdf.core.submission import build_submission
 
         manifest = ManifestConfig(
             title="T",

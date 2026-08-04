@@ -4,9 +4,9 @@ import pytest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from mdf_agent.core.exceptions import NoManifestError
-from mdf_agent.core.agent import MDFAgent
-from mdf_agent.core.manifest import load_manifest, save_manifest, init_manifest
+from mdf.core.exceptions import NoManifestError
+from mdf.core.agent import MDFAgent
+from mdf.core.manifest import load_manifest, save_manifest, init_manifest
 
 
 class TestManifestInit:
@@ -183,8 +183,8 @@ class TestValidationWarnings:
 
     def test_ml_without_data_format_warns(self):
         """An ml block missing data_format produces a warning, not an error."""
-        from mdf_agent.core.validation import validate_manifest
-        from mdf_agent.models.config import ManifestConfig
+        from mdf.core.validation import validate_manifest
+        from mdf.models.config import ManifestConfig
 
         manifest = ManifestConfig(
             title="Test",
@@ -197,8 +197,8 @@ class TestValidationWarnings:
         assert any("data_format" in w for w in warnings)
 
     def test_ml_with_data_format_no_warning(self):
-        from mdf_agent.core.validation import validate_manifest
-        from mdf_agent.models.config import ManifestConfig
+        from mdf.core.validation import validate_manifest
+        from mdf.models.config import ManifestConfig
 
         manifest = ManifestConfig(
             title="Test",
@@ -211,8 +211,8 @@ class TestValidationWarnings:
 
     def test_orcid_url_warns(self):
         """An ORCID given as a URL produces a warning."""
-        from mdf_agent.core.validation import validate_manifest
-        from mdf_agent.models.config import Author, ManifestConfig
+        from mdf.core.validation import validate_manifest
+        from mdf.models.config import Author, ManifestConfig
 
         manifest = ManifestConfig(
             title="Test",
@@ -224,8 +224,8 @@ class TestValidationWarnings:
         assert any("orcid" in w.lower() for w in warnings)
 
     def test_bare_orcid_no_warning(self):
-        from mdf_agent.core.validation import validate_manifest
-        from mdf_agent.models.config import Author, ManifestConfig
+        from mdf.core.validation import validate_manifest
+        from mdf.models.config import Author, ManifestConfig
 
         manifest = ManifestConfig(
             title="Test",
@@ -237,8 +237,8 @@ class TestValidationWarnings:
 
     def test_string_authors_do_not_break_orcid_check(self):
         """Regression: bare-string authors have no .orcid attribute."""
-        from mdf_agent.core.validation import validate_manifest
-        from mdf_agent.models.config import ManifestConfig
+        from mdf.core.validation import validate_manifest
+        from mdf.models.config import ManifestConfig
 
         manifest = ManifestConfig(
             title="Test", authors=["Jane Doe"], data_sources=["./data.csv"]

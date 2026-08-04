@@ -50,7 +50,7 @@ mdf skill install --agent codex      # or codex / gemini / all
 mdf skill install --project          # into ./.claude/skills/ instead
 ```
 
-Then invoke `/mdf-publish` from the target agent. See `src/mdf_agent/skill/skill.md`
+Then invoke `/mdf-publish` from the target agent. See `src/mdf/skill/skill.md`
 for the full list of handler actions it exposes.
 
 ## CLI commands
@@ -194,7 +194,7 @@ Or set `MDF_API_URL` to point to any backend URL.
 ### MDFAgent (high-level API)
 
 ```python
-from mdf_agent import MDFAgent
+from mdf import MDFAgent
 
 agent = MDFAgent()
 
@@ -227,7 +227,7 @@ result = agent.publish(service_instance="staging", dry_run=False)
 ### BackendClient (low-level API)
 
 ```python
-from mdf_agent import BackendClient
+from mdf import BackendClient
 
 client = BackendClient.authenticated(service_instance="staging")
 

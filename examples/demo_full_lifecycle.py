@@ -143,13 +143,13 @@ def wait_for_backend(timeout: float = 10.0) -> None:
 
 
 # ---------------------------------------------------------------------------
-# BackendClient helper (thin wrapper so we don't need mdf_agent installed)
+# BackendClient helper (thin wrapper so we don't need mdf installed)
 # ---------------------------------------------------------------------------
 
 def client():
     """Return an authenticated BackendClient for the local demo."""
     sys.path.insert(0, str(REPO_ROOT / "src"))
-    from mdf_agent.core.backend_client import BackendClient
+    from mdf.core.backend_client import BackendClient
     return BackendClient(base_url=API_URL, user_id=DEV_USER)
 
 
@@ -175,7 +175,7 @@ def demo_repository_workflow(c) -> str:
 
     # Init
     step("mdf init --title '...' --author '...'")
-    from mdf_agent.core.agent import MDFAgent
+    from mdf.core.agent import MDFAgent
     agent = MDFAgent.init(
         path=str(work_dir),
         title="High-Throughput DFT Study of Binary Intermetallic Alloys",

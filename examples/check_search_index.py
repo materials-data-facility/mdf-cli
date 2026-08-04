@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check whether a submission made it into search.
 
-Uses the mdf_agent BackendClient (handles auth automatically).
+Uses the mdf BackendClient (handles auth automatically).
 
 Usage:
     python examples/check_search_index.py
@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from mdf_agent.core.backend_client import BackendClient
+from mdf.core.backend_client import BackendClient
 
 STAGING_URL = "https://3xicgt0g7l.execute-api.us-east-1.amazonaws.com/staging"
 

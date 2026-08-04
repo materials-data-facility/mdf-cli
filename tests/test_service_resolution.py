@@ -4,11 +4,11 @@ from typing import Any
 
 import httpx
 
-from mdf_agent.auth import globus
-from mdf_agent.core import config as core_config
-from mdf_agent.core.agent import MDFAgent
-from mdf_agent.core.backend_client import BackendClient, _V2_API_URLS, _api_url_for_service
-from mdf_agent.skill import handlers as skill_handlers
+from mdf.auth import globus
+from mdf.core import config as core_config
+from mdf.core.agent import MDFAgent
+from mdf.core.backend_client import BackendClient, _V2_API_URLS, _api_url_for_service
+from mdf.skill import handlers as skill_handlers
 
 
 def test_v2_api_url_map_is_pinned():

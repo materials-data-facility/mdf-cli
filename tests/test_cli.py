@@ -9,7 +9,7 @@ import pytest
 
 from typer.testing import CliRunner
 
-from mdf_agent.cli.main import app
+from mdf.cli.main import app
 
 runner = CliRunner()
 
@@ -200,7 +200,7 @@ class TestCloneCommand:
 
     def test_clone_renders_plan_and_success_summary(self, monkeypatch):
         monkeypatch.setattr(
-            "mdf_agent.cli.main.MDFAgent.plan_clone",
+            "mdf.cli.main.MDFAgent.plan_clone",
             lambda self, **kwargs: {
                 "success": True,
                 "requested_identifier": "src-1",
@@ -216,7 +216,7 @@ class TestCloneCommand:
             },
         )
         monkeypatch.setattr(
-            "mdf_agent.cli.main.MDFAgent.clone",
+            "mdf.cli.main.MDFAgent.clone",
             lambda self, **kwargs: {
                 "success": True,
                 "method": "zip",
@@ -236,7 +236,7 @@ class TestCloneCommand:
 
     def test_clone_partial_failure_lists_failed_files(self, monkeypatch):
         monkeypatch.setattr(
-            "mdf_agent.cli.main.MDFAgent.plan_clone",
+            "mdf.cli.main.MDFAgent.plan_clone",
             lambda self, **kwargs: {
                 "success": True,
                 "requested_identifier": "src-1",
@@ -252,7 +252,7 @@ class TestCloneCommand:
             },
         )
         monkeypatch.setattr(
-            "mdf_agent.cli.main.MDFAgent.clone",
+            "mdf.cli.main.MDFAgent.clone",
             lambda self, **kwargs: {
                 "success": False,
                 "partial": True,
@@ -432,14 +432,14 @@ class TestAuthCommands:
         assert "Authentication ready" not in result.stdout
 
     def test_logout_reports_success(self, monkeypatch):
-        monkeypatch.setattr("mdf_agent.auth.globus.logout", lambda: True)
+        monkeypatch.setattr("mdf.auth.globus.logout", lambda: True)
         result = runner.invoke(app, ["logout"])
         assert result.exit_code == 0
         assert "Logged out" in result.stdout
 
     def test_whoami_uses_env_token_status(self, monkeypatch):
         """mdf whoami still works as hidden alias."""
-        monkeypatch.setattr("mdf_agent.auth.globus.is_logged_in", lambda service_instance="prod": False)
+        monkeypatch.setattr("mdf.auth.globus.is_logged_in", lambda service_instance="prod": False)
         monkeypatch.setenv("MDF_CONNECT_TOKEN", "env-token")
         result = runner.invoke(app, ["whoami", "--service", "prod"])
         assert result.exit_code == 0
@@ -448,7 +448,7 @@ class TestAuthCommands:
 
     def test_status_auth_flag(self, monkeypatch):
         """mdf status --auth shows identity info (absorbs whoami)."""
-        monkeypatch.setattr("mdf_agent.auth.globus.is_logged_in", lambda service_instance="prod": False)
+        monkeypatch.setattr("mdf.auth.globus.is_logged_in", lambda service_instance="prod": False)
         monkeypatch.setenv("MDF_CONNECT_TOKEN", "env-token")
         result = runner.invoke(app, ["status", "--auth", "--service", "prod"])
         assert result.exit_code == 0
@@ -471,7 +471,7 @@ class TestSetupAndManifestUX:
             )
 
             assert result.exit_code == 0
-            config_path = home / ".config" / "mdf_agent" / "config.json"
+            config_path = home / ".config" / "mdf" / "config.json"
             assert config_path.exists()
             config = json.loads(config_path.read_text())
             assert config["defaults"]["service"] == "staging"
@@ -604,7 +604,7 @@ class TestListAndStreamRegressions:
                 return None
 
         monkeypatch.setattr(
-            "mdf_agent.cli.main.BackendClient.authenticated",
+            "mdf.cli.main.BackendClient.authenticated",
             lambda **kwargs: FakeClient(),
         )
 
@@ -647,7 +647,7 @@ class TestListAndStreamRegressions:
         assert "file streaming is disabled in the current MDF release" in result.stdout
 
     def test_stream_upload_exits_nonzero_when_file_fails(self, monkeypatch, tmp_path):
-        from mdf_agent.cli import stream as stream_cli
+        from mdf.cli import stream as stream_cli
 
         data_file = tmp_path / "data.csv"
         data_file.write_text("a,b\n1,2\n")
@@ -661,7 +661,7 @@ class TestListAndStreamRegressions:
 
         monkeypatch.setattr(stream_cli, "STREAMING_ENABLED", True)
         monkeypatch.setattr(
-            "mdf_agent.cli.stream.BackendClient.authenticated",
+            "mdf.cli.stream.BackendClient.authenticated",
             lambda **kwargs: FakeClient(),
         )
 
@@ -684,7 +684,7 @@ class TestPreflightAndIdentifiers:
             "source_summary": {"files": 1, "bytes": 3},
             "sources": [{"source": "./data.csv", "kind": "local", "file_count": 1, "total_bytes": 3}],
         }
-        monkeypatch.setattr("mdf_agent.cli.main.run_preflight", lambda *args, **kwargs: fake_preflight)
+        monkeypatch.setattr("mdf.cli.main.run_preflight", lambda *args, **kwargs: fake_preflight)
 
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -715,7 +715,7 @@ class TestPreflightAndIdentifiers:
                     }
                 }
 
-        monkeypatch.setattr("mdf_agent.cli.main.BackendClient.authenticated", lambda **kwargs: FakeClient())
+        monkeypatch.setattr("mdf.cli.main.BackendClient.authenticated", lambda **kwargs: FakeClient())
         result = runner.invoke(app, ["status", "src-1"])
         assert result.exit_code == 0
         assert "Missing methods" in result.stdout
@@ -753,7 +753,7 @@ class TestPreflightAndIdentifiers:
 
         # `show` is a public read and now builds its client via read_client()
         # (no forced interactive login). Patch that seam.
-        monkeypatch.setattr("mdf_agent.cli.main.read_client", lambda **kwargs: FakeClient())
+        monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: FakeClient())
         result = runner.invoke(app, ["show", "10.1234/example"])
         assert result.exit_code == 0
         assert seen["card_id"] == "src-resolved"

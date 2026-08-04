@@ -4,8 +4,8 @@ import sys
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
-from mdf_agent.core.backend_client import BackendClient, _api_url_for_service
-from mdf_agent.auth.globus import NCSA_MDF_COLLECTION_UUID, get_scopes_for_service
+from mdf.core.backend_client import BackendClient, _api_url_for_service
+from mdf.auth.globus import NCSA_MDF_COLLECTION_UUID, get_scopes_for_service
 
 
 class _DummyResponse:

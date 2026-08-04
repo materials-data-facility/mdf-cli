@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from mdf_agent.core.backend_client import BackendClient
+from mdf.core.backend_client import BackendClient
 
 
 class _DummyResponse:

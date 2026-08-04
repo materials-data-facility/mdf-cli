@@ -2,8 +2,8 @@
 
 import pytest
 
-from mdf_agent.core.submission import normalize_data_source, resolve_data_sources
-from mdf_agent.auth.globus import NCSA_MDF_COLLECTION_UUID
+from mdf.core.submission import normalize_data_source, resolve_data_sources
+from mdf.auth.globus import NCSA_MDF_COLLECTION_UUID
 
 
 class TestNormalizeDataSource:

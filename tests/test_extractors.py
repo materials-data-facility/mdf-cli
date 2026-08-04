@@ -5,10 +5,10 @@ import pytest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from mdf_agent.extractors.base import BaseExtractor
-from mdf_agent.extractors.tabular import TabularExtractor
-from mdf_agent.extractors.json_yaml import JsonYamlExtractor
-from mdf_agent.extractors.registry import discover_metadata
+from mdf.extractors.base import BaseExtractor
+from mdf.extractors.tabular import TabularExtractor
+from mdf.extractors.json_yaml import JsonYamlExtractor
+from mdf.extractors.registry import discover_metadata
 
 
 class TestBaseExtractor:
@@ -251,28 +251,28 @@ class TestPDFExtractor:
 
     def test_can_extract_pdf(self):
         """PDFExtractor handles .pdf files."""
-        from mdf_agent.extractors.pdf import PDFExtractor
+        from mdf.extractors.pdf import PDFExtractor
 
         assert PDFExtractor.can_extract(Path("paper.pdf")) is True
         assert PDFExtractor.can_extract(Path("PAPER.PDF")) is True
 
     def test_cannot_extract_other(self):
         """PDFExtractor rejects non-PDF files."""
-        from mdf_agent.extractors.pdf import PDFExtractor
+        from mdf.extractors.pdf import PDFExtractor
 
         assert PDFExtractor.can_extract(Path("data.csv")) is False
         assert PDFExtractor.can_extract(Path("doc.docx")) is False
 
     def test_extract_nonexistent_file(self):
         """Extract nonexistent PDF returns empty dict."""
-        from mdf_agent.extractors.pdf import PDFExtractor
+        from mdf.extractors.pdf import PDFExtractor
 
         result = PDFExtractor.extract(Path("/nonexistent/file.pdf"))
         assert result == {}
 
     def test_doi_pattern(self):
         """DOI regex pattern matches valid DOIs."""
-        from mdf_agent.extractors.pdf import DOI_PATTERN
+        from mdf.extractors.pdf import DOI_PATTERN
 
         # Valid DOIs
         assert DOI_PATTERN.search("10.1234/abc123")
