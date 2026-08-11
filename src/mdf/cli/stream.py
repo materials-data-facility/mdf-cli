@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import typer
-from rich.console import Console
-from rich.table import Table
+from rich.markup import escape
 
 from mdf.core.backend_client import BackendClient
 from mdf.core.config import resolve_service
+from mdf.cli import theme
 from mdf.cli.formatting import format_result_or_json, handle_api_result
-
-console = Console()
+from mdf.cli.theme import console
 
 app = typer.Typer(help="MDF Streaming commands")
 _auth_opts: Dict[str, Optional[str]] = {"service": None, "token": None, "dev_user": None}
@@ -29,7 +27,12 @@ def stream_callback(
 ):
     """MDF Streaming commands."""
     if not STREAMING_ENABLED:
-        console.print(f"[yellow]{_DISABLED_MESSAGE}[/yellow]")
+        console.print(theme.check_line(
+            "idle",
+            _DISABLED_MESSAGE,
+            hint="publish files with `mdf publish` instead",
+            indent=0,
+        ))
         raise typer.Exit(code=1)
     _auth_opts.update(service=service, token=token, dev_user=dev_user)
 
@@ -62,7 +65,9 @@ def create(
         _print(result)
     else:
         if result.get("success"):
-            console.print(f"[green]Stream created:[/green] {result.get('stream_id')}")
+            console.print(theme.mark(
+                "ok", f"Stream created: {theme.ident(result.get('stream_id'))}", style=None
+            ))
         else:
             handle_api_result(result, error_prefix="Stream create failed")
 
@@ -171,24 +176,15 @@ def upload(
     """
     import hashlib
     import httpx
-    from rich.progress import Progress, BarColumn, DownloadColumn, TransferSpeedColumn
 
     client = _client(api_url)
 
     uploaded = []
     errors = []
 
-    use_progress = sys.stderr.isatty()
     progress_ctx = None
-    if use_progress:
-        progress_ctx = Progress(
-            "[progress.description]{task.description}",
-            BarColumn(),
-            DownloadColumn(),
-            TransferSpeedColumn(),
-            console=console,
-            transient=True,
-        )
+    if theme.interactive():
+        progress_ctx = theme.simple_progress()
         progress_ctx.start()
 
     try:
@@ -269,25 +265,32 @@ def upload(
     client.close()
 
     if uploaded:
-        console.print(f"\n[green]Uploaded {len(uploaded)} file(s)[/green]")
-        table = Table(show_header=True, header_style="bold")
+        console.print()
+        console.print(theme.mark("ok", f"Uploaded {len(uploaded)} file(s)", style="ok"))
+        table = theme.table()
         table.add_column("Filename")
-        table.add_column("Size", justify="right")
-        table.add_column("Checksum", style="dim")
+        table.add_column("Size", justify="right", style="value")
+        table.add_column("Checksum", style="secondary")
 
         for f in uploaded:
             size_kb = f.get("size_bytes", 0) / 1024
             table.add_row(
-                f.get("filename", ""),
+                escape(str(f.get("filename", ""))),
                 f"{size_kb:.1f} KB",
-                (f.get("checksum_md5", "") or "")[:12] + "...",
+                escape((f.get("checksum_md5", "") or "")[:12] + "..."),
             )
         console.print(table)
 
     if errors:
-        console.print(f"\n[red]Errors ({len(errors)}):[/red]")
-        for err in errors:
-            console.print(f"  [red]x[/red] {err['file']}: {err['error']}")
+        console.print()
+        console.print(theme.error_panel(
+            "\n".join(
+                theme.mark("err", f"{escape(str(err['file']))}: {escape(str(err['error']))}")
+                for err in errors
+            ),
+            title=f"Upload failed ({len(errors)} file(s))",
+            hint="check the paths and the stream id, then retry the failed files",
+        ))
         raise typer.Exit(code=1)
 
 
@@ -303,26 +306,33 @@ def list_files(
 
     if result.get("success"):
         files = result.get("files", [])
-        console.print(f"\n[bold]Stream {stream_id}[/bold] - {len(files)} file(s)\n")
+        console.print(
+            f"\n[bold]Stream[/bold] {theme.ident(stream_id)} "
+            f"[secondary]- {len(files)} file(s)[/secondary]\n"
+        )
 
         if files:
-            table = Table(show_header=True, header_style="bold")
+            table = theme.table()
             table.add_column("Filename")
-            table.add_column("Size", justify="right")
-            table.add_column("Uploaded", style="dim")
-            table.add_column("Checksum", style="dim")
+            table.add_column("Size", justify="right", style="value")
+            table.add_column("Uploaded", style="secondary")
+            table.add_column("Checksum", style="secondary")
 
             for f in files:
                 size_kb = f.get("size_bytes", 0) / 1024
                 stored_at = f.get("stored_at", "")[:19] if f.get("stored_at") else ""
                 table.add_row(
-                    f.get("filename", ""),
+                    escape(str(f.get("filename", ""))),
                     f"{size_kb:.1f} KB",
-                    stored_at,
-                    f.get("checksum_md5", "")[:12] + "...",
+                    escape(str(stored_at)),
+                    escape(f.get("checksum_md5", "")[:12] + "..."),
                 )
             console.print(table)
         else:
-            console.print("[dim]No files uploaded yet[/dim]")
+            console.print(theme.empty_panel(
+                "No files uploaded yet",
+                title="empty stream",
+                hints=["add files with `mdf stream upload --stream-id <id> <files>`"],
+            ))
     else:
-        console.print(f"[red]Error:[/red] {result.get('error', 'Unknown error')}")
+        handle_api_result(result, error_prefix="Stream files failed")

@@ -11,6 +11,7 @@ from rich.markup import escape
 
 from mdf.core.backend_client import BackendClient
 from mdf.core.config import resolve_service
+from mdf.cli import theme
 from mdf.cli.formatting import (
     api_spinner,
     console,
@@ -31,16 +32,13 @@ app = typer.Typer(
 def _resolve_identifier_with_notice(client: BackendClient, raw_id: str) -> str:
     resolved_id = resolve_dataset_identifier(raw_id, client)
     if resolved_id != raw_id:
-        console.print(f"[dim]Resolved DOI to source ID:[/dim] {resolved_id}")
+        console.print(
+            f"[secondary]Resolved DOI to source ID:[/secondary] {theme.ident(resolved_id)}"
+        )
     return resolved_id
 
 
-def _human_size(nbytes: float) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(nbytes) < 1024:
-            return f"{nbytes:.1f} {unit}"
-        nbytes /= 1024
-    return f"{nbytes:.1f} PB"
+_human_size = theme.human_size
 
 
 def _copy_to_clipboard(text: str) -> None:
@@ -54,12 +52,12 @@ def _copy_to_clipboard(text: str) -> None:
     elif shutil.which("xsel"):
         cmd = ["xsel", "--clipboard", "--input"]
     else:
-        console.print("[dim]Clipboard not available[/dim]")
+        console.print("[secondary]Clipboard not available[/secondary]")
         return
 
     try:
         subprocess.run(cmd, input=text.encode(), check=True, timeout=5)
-        console.print("[dim]Copied to clipboard[/dim]")
+        console.print(theme.mark("ok", "Copied to clipboard", style="secondary"))
     except Exception:
         pass
 
@@ -83,8 +81,6 @@ def cite(
         mdf dataset cite my_dataset -f bibtex             # BibTeX for papers
         mdf dataset cite my_dataset --copy                # Copy to clipboard
     """
-    from rich.panel import Panel
-
     resolved = resolve_service(service)
     client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
     source_id = _resolve_identifier_with_notice(client, source_id)
@@ -106,15 +102,20 @@ def cite(
     if copy:
         _copy_to_clipboard(citation_text)
 
+    # Structured citation formats get their lexer; APA is prose.
+    lexers = {"bibtex": "bibtex", "ris": "text", "datacite": "xml"}
+    titles = {
+        "bibtex": "BibTeX",
+        "ris": "RIS",
+        "datacite": "DataCite XML",
+        "apa": "APA Citation",
+    }
+    title = titles.get(format, "APA Citation")
+    lexer = lexers.get(format)
+    body = theme.syntax(citation_text, lexer, word_wrap=True) if lexer else escape(citation_text)
+
     console.print()
-    if format == "bibtex":
-        console.print(Panel(citation_text, title="BibTeX", border_style="green"))
-    elif format == "ris":
-        console.print(Panel(citation_text, title="RIS", border_style="green"))
-    elif format == "datacite":
-        console.print(Panel(citation_text, title="DataCite XML", border_style="green"))
-    else:
-        console.print(Panel(citation_text, title="APA Citation", border_style="green"))
+    console.print(theme.panel(body, title=title, subtitle=source_id))
     console.print()
 
 
@@ -154,7 +155,7 @@ def open_dataset(
     if url:
         print(target_url)
     else:
-        console.print(f"[dim]Opening:[/dim] {target_url}")
+        console.print(f"[secondary]Opening:[/secondary] {escape(target_url)}")
         webbrowser.open(target_url)
 
 
@@ -174,8 +175,6 @@ def preview(
         mdf dataset preview my_dataset_v1
         mdf dataset preview my_dataset_v1 --sample
     """
-    from rich.table import Table
-
     resolved = resolve_service(service)
     client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
     source_id = _resolve_identifier_with_notice(client, source_id)
@@ -197,14 +196,16 @@ def preview(
         if json_output:
             print(json.dumps(result, indent=2))
             return
-        console.print(
-            "\n[yellow]No file profile exists for this dataset[/yellow] "
-            "[dim](profiles are not yet generated for migrated records).[/dim]"
-        )
-        console.print(
-            f"[dim]Try:[/dim] [cyan]mdf show {source_id}[/cyan] [dim]for metadata, or[/dim] "
-            f"[cyan]mdf clone {source_id}[/cyan] [dim]to download.[/dim]"
-        )
+        console.print()
+        console.print(theme.empty_panel(
+            "No file profile exists for this dataset\n"
+            "(profiles are not yet generated for migrated records).",
+            title="no profile",
+            hints=[
+                f"mdf show {source_id} — for metadata",
+                f"mdf clone {source_id} — to download the files",
+            ],
+        ))
         return
 
     if json_output:
@@ -220,34 +221,44 @@ def preview(
         rows = result.get("rows") or result.get("data", [])
         columns = result.get("columns", [])
         if not rows:
-            console.print("[dim]No sample data available.[/dim]")
+            console.print()
+            console.print(theme.empty_panel(
+                "No sample data available.",
+                title="no sample",
+                hints=[f"list the files instead: `mdf dataset preview {source_id}`"],
+            ))
             return
         if not columns and rows:
             first = rows[0]
             if isinstance(first, dict):
                 columns = list(first.keys())
-        console.print(f"\n[bold]Sample ({len(rows)} rows):[/bold]\n")
-        table = Table(show_header=True, header_style="bold")
+        console.print(f"\n[bold]Sample[/bold] [secondary]({len(rows)} rows)[/secondary]\n")
+        table = theme.table()
         for col in columns[:10]:
-            table.add_column(str(col), max_width=30)
+            table.add_column(escape(str(col)), max_width=30)
         for row in rows[:20]:
             if isinstance(row, dict):
-                table.add_row(*[str(row.get(c, ""))[:30] for c in columns[:10]])
+                table.add_row(*[escape(str(row.get(c, ""))[:30]) for c in columns[:10]])
             elif isinstance(row, (list, tuple)):
-                table.add_row(*[str(v)[:30] for v in row[:10]])
+                table.add_row(*[escape(str(v)[:30]) for v in row[:10]])
         console.print(table)
         if len(rows) > 20:
-            console.print(f"[dim]... and {len(rows) - 20} more rows[/dim]")
+            console.print(f"[secondary]... and {len(rows) - 20} more rows[/secondary]")
     else:
         files = result.get("files", result.get("data_sources", []))
         if not files:
-            console.print("[dim]No file information available.[/dim]")
+            console.print()
+            console.print(theme.empty_panel(
+                "No file information available.",
+                title="no files",
+                hints=[f"see the metadata with `mdf show {source_id}`"],
+            ))
             return
-        console.print(f"\n[bold]Files ({len(files)}):[/bold]\n")
-        table = Table(show_header=True, header_style="bold")
+        console.print(f"\n[bold]Files[/bold] [secondary]({len(files)})[/secondary]\n")
+        table = theme.table()
         table.add_column("Name", max_width=50)
-        table.add_column("Size", style="dim", no_wrap=True, justify="right")
-        table.add_column("Type", style="dim", no_wrap=True)
+        table.add_column("Size", style="value", no_wrap=True, justify="right")
+        table.add_column("Type", style="secondary", no_wrap=True)
         for f in files:
             name = f.get("filename") or f.get("name") or f.get("path", "?")
             size = f.get("size") or f.get("length", "")
@@ -276,8 +287,6 @@ def versions(
     Examples:
         mdf dataset versions my_dataset_v1
     """
-    from rich.table import Table
-
     resolved = resolve_service(service)
     client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
     source_id = _resolve_identifier_with_notice(client, source_id)
@@ -291,22 +300,32 @@ def versions(
 
     if not is_success(result):
         message = result.get("error") or result.get("detail") or "No versions found"
-        console.print(f"[yellow]{escape(str(message))}[/yellow]")
+        console.print()
+        console.print(theme.empty_panel(
+            escape(str(message)),
+            title="no versions",
+            hints=[f"confirm the dataset exists with `mdf show {source_id}`"],
+        ))
         return
 
     version_list = result.get("versions", [])
     if not version_list:
-        console.print("[dim]No versions found.[/dim]")
+        console.print()
+        console.print(theme.empty_panel(
+            "No versions found.",
+            title="no versions",
+            hints=[f"confirm the dataset exists with `mdf show {source_id}`"],
+        ))
         return
 
-    console.print(f"\n[bold]Versions for[/bold] [cyan]{source_id}[/cyan]\n")
+    console.print(f"\n[bold]Versions for[/bold] {theme.ident(source_id)}\n")
 
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Version", no_wrap=True)
+    table = theme.table()
+    table.add_column("Version", no_wrap=True, justify="right", style="id")
     table.add_column("Title", max_width=40)
     table.add_column("Status", no_wrap=True)
-    table.add_column("DOI", style="dim")
-    table.add_column("Updated", style="dim", no_wrap=True)
+    table.add_column("DOI", style="secondary")
+    table.add_column("Updated", style="secondary", no_wrap=True)
 
     for v in version_list:
         doi = v.get("doi") or ""
@@ -323,8 +342,11 @@ def versions(
 
     dataset_doi = result.get("dataset_doi")
     if dataset_doi:
-        console.print(f"\n[dim]Dataset DOI:[/dim] https://doi.org/{dataset_doi}")
-    console.print(f"[dim]Next:[/dim] mdf show {source_id} | mdf dataset diff {source_id} --from 1.0 --to {version_list[-1].get('version', '1.0')}")
+        console.print(f"\n[label]Dataset DOI:[/label] https://doi.org/{escape(str(dataset_doi))}")
+    console.print(
+        f"[hint]Next: mdf show {source_id} | mdf dataset diff {source_id} "
+        f"--from 1.0 --to {version_list[-1].get('version', '1.0')}[/hint]"
+    )
     console.print()
 
 
@@ -344,8 +366,6 @@ def diff(
     Examples:
         mdf dataset diff my_dataset_v1 --from 1.0 --to 2.0
     """
-    from rich.table import Table
-
     resolved = resolve_service(service)
     client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
     source_id = _resolve_identifier_with_notice(client, source_id)
@@ -366,27 +386,34 @@ def diff(
     fv = result.get("from_version", {})
     tv = result.get("to_version", {})
 
-    console.print(f"\n[bold]Diff[/bold] [cyan]{source_id}[/cyan]  "
-                  f"v{fv.get('version', from_version)} -> v{tv.get('version', to_version)}\n")
+    console.print(
+        f"\n[bold]Diff[/bold] {theme.ident(source_id)}  "
+        f"[secondary]v{escape(str(fv.get('version', from_version)))} → "
+        f"v{escape(str(tv.get('version', to_version)))}[/secondary]\n"
+    )
 
-    table = Table(show_header=True, header_style="bold")
+    table = theme.table()
     table.add_column("Change", no_wrap=True, width=8)
     table.add_column("Field", no_wrap=True)
     table.add_column("Value")
 
     for field, value in d.get("added", {}).items():
-        table.add_row("[green]+[/green]", field, str(value)[:80])
+        table.add_row("[ok]+ added[/ok]", escape(str(field)), escape(str(value)[:80]))
     for field, value in d.get("removed", {}).items():
-        table.add_row("[red]-[/red]", field, str(value)[:80])
+        table.add_row("[err]- removed[/err]", escape(str(field)), escape(str(value)[:80]))
     for field, change in d.get("changed", {}).items():
-        table.add_row("[yellow]~[/yellow]", field,
-                      f"{str(change.get('from', ''))[:35]} -> {str(change.get('to', ''))[:35]}")
+        table.add_row(
+            "[warn]~ changed[/warn]",
+            escape(str(field)),
+            f"{escape(str(change.get('from', ''))[:35])} [secondary]→[/secondary] "
+            f"{escape(str(change.get('to', ''))[:35])}",
+        )
 
     console.print(table)
 
     unchanged = d.get("unchanged", [])
     if unchanged:
-        console.print(f"\n[dim]Unchanged: {', '.join(unchanged)}[/dim]")
+        console.print(f"\n[secondary]Unchanged: {escape(', '.join(unchanged))}[/secondary]")
     console.print()
 
 
@@ -425,8 +452,11 @@ def edit(
         fields["keywords"] = keywords
 
     if not fields:
-        console.print("[red]No fields provided to edit.[/red]")
-        console.print("[dim]Use --title, --description, or --keyword flags.[/dim]")
+        console.print(theme.error_panel(
+            "No fields provided to edit.",
+            title="Nothing to edit",
+            hint="use --title, --description, or --keyword",
+        ))
         raise typer.Exit(code=1)
 
     with api_spinner("Editing metadata..."):
@@ -440,11 +470,14 @@ def edit(
         return
 
     if is_success(result):
-        console.print(f"\n[bold green]Metadata updated:[/bold green] [cyan]{source_id}[/cyan]")
+        detail = theme.detail_table(label_width=12)
+        detail.add_row("Dataset", theme.ident(source_id))
         if result.get("updated_fields"):
-            console.print(f"  [dim]Fields:[/dim] {', '.join(result['updated_fields'])}")
+            detail.add_row("Fields", escape(", ".join(result["updated_fields"])))
         if result.get("new_version"):
-            console.print(f"  [dim]New version:[/dim] {result['new_version']}")
+            detail.add_row("New version", theme.ident(result["new_version"]))
+        console.print()
+        console.print(theme.success_panel(detail, title="Metadata updated"))
     else:
         require_success(result, error_prefix="Edit failed")
 
@@ -490,7 +523,14 @@ def withdraw(
         return
 
     if is_success(result):
-        console.print(f"\n[bold yellow]Withdrawn:[/bold yellow] [cyan]{source_id}[/cyan]")
+        console.print()
+        console.print(theme.panel(
+            f"{theme.ident(source_id)} is no longer in the curation queue.\n"
+            f"[label]Status:[/label] {format_status_badge('withdrawn')}",
+            title=f"{theme.ACTIVE} Withdrawn",
+            border="yellow",
+            title_style="warn",
+        ))
     else:
         require_success(result, error_prefix="Withdraw failed")
 
@@ -530,7 +570,12 @@ def resubmit(
         return
 
     if is_success(result):
-        console.print(f"\n[bold green]Resubmitted:[/bold green] [cyan]{source_id}[/cyan]")
-        console.print(f"  [dim]Status:[/dim] {format_status_badge('pending_curation')}")
+        detail = theme.detail_table(label_width=9)
+        detail.add_row("Dataset", theme.ident(source_id))
+        detail.add_row("Status", format_status_badge("pending_curation"))
+        console.print()
+        console.print(theme.success_panel(
+            detail, title="Resubmitted", subtitle="back in the curation queue"
+        ))
     else:
         require_success(result, error_prefix="Resubmit failed")

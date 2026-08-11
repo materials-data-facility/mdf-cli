@@ -9,14 +9,14 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-from rich.console import Console
-from rich.syntax import Syntax
+from rich.markup import escape
 
 from mdf.core.config import GlobalConfig, resolve_service
+from mdf.cli import theme
 from mdf.cli.manifest_cmd import app as manifest_app
+from mdf.cli.theme import console
 
 app = typer.Typer(help="Manage configuration")
-console = Console()
 
 app.add_typer(manifest_app, name="manifest")
 
@@ -26,11 +26,16 @@ def show():
     """Show current configuration."""
     cfg = GlobalConfig()
     if cfg.data:
-        syntax = Syntax(json.dumps(cfg.data, indent=2), "json", theme="monokai")
-        console.print(syntax)
+        console.print(theme.json_syntax(cfg.data))
     else:
-        console.print("[dim]No configuration set yet.[/dim]")
-        console.print(f"[dim]Config file:[/dim] {cfg.path}")
+        console.print(theme.empty_panel(
+            "No configuration set yet.",
+            title="no config",
+            hints=[
+                "run `mdf setup` for guided configuration",
+                f"config file would live at {cfg.path}",
+            ],
+        ))
 
 
 @app.command("set")
@@ -43,11 +48,13 @@ def set_value(
 
     warning = validate_config_value(key, value)
     if warning:
-        console.print(f"[yellow]Warning:[/yellow] {warning}")
+        console.print(theme.mark("active", f"Warning: {escape(str(warning))}", style="warn"))
 
     cfg = GlobalConfig()
     cfg.set(key, value)
-    console.print(f"[green]Set[/green] {key} = {value}")
+    console.print(
+        theme.mark("ok", f"Set {escape(key)} = {theme.number(value)}", style=None)
+    )
 
 
 @app.command("get")
@@ -58,7 +65,7 @@ def get_value(
     cfg = GlobalConfig()
     val = cfg.get(key)
     if val is None:
-        console.print(f"[dim]{key} is not set[/dim]")
+        console.print(f"[secondary]{escape(key)} is not set[/secondary]")
         raise typer.Exit(code=1)
     if isinstance(val, (dict, list)):
         console.print(json.dumps(val, indent=2))
@@ -158,8 +165,25 @@ def doctor(
         print(json.dumps({"success": all(c["ok"] for c in checks), "checks": checks}, indent=2))
         return
 
-    console.print(f"\n[bold]MDF Agent[/bold] v{__version__}\n")
+    console.print()
+    console.print(theme.rule(f"{theme.SCIENCE} mdf doctor  v{__version__}"))
+    console.print()
+    checklist = theme.checklist_table()
     for c in checks:
-        symbol = "[green]*[/green]" if c["ok"] else "[dim]-[/dim]"
-        console.print(f"  {symbol}  [bold]{c['name']:14s}[/bold] {c['detail']}")
+        theme.add_check(
+            checklist,
+            "ok" if c["ok"] else "err",
+            escape(str(c["name"])),
+            detail=escape(str(c["detail"])),
+        )
+    console.print(checklist)
+    if all(check["ok"] for check in checks):
+        console.print()
+        console.print(theme.mark("ok", "Everything checks out.", style="ok"))
+    else:
+        console.print()
+        console.print(
+            "[hint]hint: fix the ✗ rows above — `mdf login` for auth, "
+            "`mdf setup` for config/manifest[/hint]"
+        )
     console.print()

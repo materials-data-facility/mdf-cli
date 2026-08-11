@@ -1,44 +1,31 @@
 """Shared output formatting for MDF CLI commands.
 
 Provides consistent Rich-formatted output for API results, status badges,
-and error interpretation across all CLI commands.
+and error interpretation across all CLI commands. The visual vocabulary itself
+(colors, glyphs, panels, tables, progress) lives in :mod:`mdf.cli.theme`; this
+module is the API-result layer on top of it.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import sys
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Optional
 
-from rich.console import Console
-
-console = Console(no_color=bool(os.environ.get("NO_COLOR")))
-
-_STATUS_STYLES = {
-    "published":        "[green]* published[/green]",
-    "pending_curation": "[yellow]~ pending_curation[/yellow]",
-    "pending":          "[yellow]~ pending[/yellow]",
-    "approved":         "[blue]> approved[/blue]",
-    "publish_failed":   "[red]! publish_failed[/red]",
-    "rejected":         "[red]x rejected[/red]",
-    "failed":           "[red]! failed[/red]",
-    "withdrawn":        "[dim]- withdrawn[/dim]",
-    "deleted":          "[dim]- deleted[/dim]",
-    "active":           "[cyan]> active[/cyan]",
-    "closed":           "[dim]- closed[/dim]",
-}
+from mdf.cli import theme
+# ``console`` (stdout, data) and ``err_console`` (stderr, chrome) are re-exported
+# here because most command modules already import their console from this module.
+from mdf.cli.theme import console, err_console  # noqa: F401
 
 
 def format_status_badge(status: str) -> str:
-    """Return Rich-markup colored string for a submission status."""
-    from rich.markup import escape
+    """Return a glyph + word badge for a submission status.
 
-    known = _STATUS_STYLES.get(status)
-    if known:
-        return known
-    return f"[dim]{escape(str(status))}[/dim]"
+    ``✓ published``, ``● pending_curation``, ``✗ rejected``, ``○ withdrawn`` —
+    the state word is always preserved so output stays greppable.
+    """
+    return theme.state_badge(status)
 
 
 def read_client(
@@ -65,7 +52,15 @@ def read_client(
     try:
         base = api_url or _api_url_for_service(service)
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        from rich.markup import escape
+
+        console.print(
+            theme.error_panel(
+                escape(str(exc)),
+                title="Unknown service",
+                hint="pick one of staging, prod, dev, local — or pass --api-url",
+            )
+        )
         raise typer.Exit(code=1)
 
     has_creds = bool(
@@ -95,11 +90,11 @@ def read_client(
 
 @contextmanager
 def api_spinner(message: str = "Loading..."):
-    """Show a Rich spinner while waiting for an API call. Auto-suppresses in pipes/non-TTY."""
-    if sys.stderr.isatty() and not os.environ.get("NO_COLOR"):
-        with console.status(f"[dim]{message}[/dim]", spinner="dots"):
-            yield
-    else:
+    """Show a ``dots`` spinner on stderr while waiting for an API call.
+
+    Auto-suppresses in pipes/non-TTY, so machine output is never polluted.
+    """
+    with theme.spinner(message):
         yield
 
 
@@ -153,6 +148,129 @@ def is_success(result: Any) -> bool:
     return not (result.get("error") or result.get("detail"))
 
 
+#: kind -> (message, hint, border). ``kind`` is what classification decides;
+#: the message wording is load-bearing (scripts and docs grep for it).
+_ERROR_KINDS: Dict[str, tuple] = {
+    "auth": (
+        "Authentication required",
+        "run `mdf login` (or set MDF_CONNECT_TOKEN for CI)",
+        "red",
+    ),
+    "forbidden": (
+        "Permission denied",
+        "you may not own this record — check --service, or ask a curator",
+        "red",
+    ),
+    "rate_limit": (
+        "Rate limited — try again shortly",
+        "wait a few seconds, then retry the same command",
+        "yellow",
+    ),
+    "not_found": (
+        "Not found",
+        "check the identifier, or find it with `mdf search <query>`",
+        "yellow",
+    ),
+    "validation": (
+        "Validation error",
+        "fix the highlighted fields, then re-run with --preflight-only to verify",
+        "red",
+    ),
+    "server": (
+        "Server error",
+        "the backend may be busy or deploying — retry, then `mdf config doctor`",
+        "red",
+    ),
+    # No HTTP status ever arrived: the request never reached the API.
+    "network": (
+        None,
+        "check connectivity with `mdf config doctor`, or select another --service",
+        "red",
+    ),
+    "unknown": (
+        None,
+        "re-run with --json to see the raw response",
+        "red",
+    ),
+}
+
+_NETWORK_MARKERS = (
+    "connection failed",
+    "cannot connect",
+    "connect error",
+    "connecterror",
+    "connection refused",
+    "timed out",
+    "timeout",
+    "name or service not known",
+    "nodename nor servname",
+)
+
+
+def classify_api_error(result: Any) -> Dict[str, Optional[str]]:
+    """Classify a failed API result into the CLI's error vocabulary.
+
+    Prefers the propagated HTTP status code and only falls back to
+    substring-matching the error text when no status is available. Returns
+    ``{"kind", "code", "message", "detail", "hint", "border"}`` — ``detail`` is
+    the raw server text (unescaped).
+    """
+    status = status_code_of(result)
+    raw_error = "Unknown error"
+    if isinstance(result, dict):
+        raw_error = result.get("error") or result.get("detail") or "Unknown error"
+
+    kind = "unknown"
+    if status is not None:
+        if status in (401, 407):
+            kind = "auth"
+        elif status == 403:
+            kind = "forbidden"
+        elif status == 429:
+            kind = "rate_limit"
+        elif status == 404:
+            kind = "not_found"
+        elif status in (400, 422):
+            kind = "validation"
+        elif status >= 500:
+            kind = "server"
+    else:
+        error_str = str(raw_error).lower()
+        if "401" in error_str or "unauthorized" in error_str or "not authenticated" in error_str:
+            kind = "auth"
+        elif "403" in error_str or "forbidden" in error_str:
+            kind = "forbidden"
+        elif "429" in error_str or "rate limit" in error_str:
+            kind = "rate_limit"
+        elif "404" in error_str or "not found" in error_str:
+            kind = "not_found"
+        elif "validation" in error_str:
+            kind = "validation"
+        elif any(marker in error_str for marker in _NETWORK_MARKERS):
+            kind = "network"
+
+    message, hint, border = _ERROR_KINDS[kind]
+    if kind == "server" and status is not None:
+        message = f"Server error (HTTP {status})"
+    if message is None:
+        message = str(raw_error)
+
+    # Only show the raw server text when it adds something beyond the message.
+    detail: Optional[str] = str(raw_error)
+    if detail == message or kind in ("auth", "forbidden", "rate_limit", "not_found"):
+        detail = None
+
+    code = f"HTTP {status}" if status is not None else None
+    return {
+        "kind": kind,
+        "code": code,
+        "message": message,
+        "detail": detail,
+        "hint": hint,
+        "border": border,
+    }
+
+
 def handle_api_result(
     result: Dict[str, Any],
     success_msg: Optional[str] = None,
@@ -160,74 +278,29 @@ def handle_api_result(
 ) -> bool:
     """Interpret an API result and print formatted output.
 
-    Classification prefers the propagated HTTP status code and only falls back
-    to substring-matching the error text when no status is available.
+    Success prints a ``✓`` line; failure prints the contract's ``✗``-titled panel
+    (error code in the title, message in the body, recovery ``hint:`` last).
 
     Returns True on success, False on error.
     """
-    status = status_code_of(result)
     if is_success(result):
         if success_msg:
-            console.print(f"[green]{success_msg}[/green]")
+            console.print(theme.mark("ok", success_msg, style="ok"))
         return True
 
     from rich.markup import escape
 
-    raw_error = result.get("error") or result.get("detail") or "Unknown error"
-    # Server-controlled text is rendered inside Rich markup below — escape it
-    # once here; classification (which needs the raw text) uses raw_error.
-    error = escape(str(raw_error))
-
-    if status is not None:
-        if status in (401, 407):
-            console.print(f"[red]{error_prefix}: Authentication required[/red]")
-            console.print("[dim]Run:[/dim] [cyan]mdf login[/cyan]")
-            return False
-        if status == 403:
-            console.print(f"[red]{error_prefix}: Permission denied[/red]")
-            return False
-        if status == 429:
-            console.print(f"[yellow]{error_prefix}: Rate limited — try again shortly[/yellow]")
-            return False
-        if status == 404:
-            console.print(f"[yellow]{error_prefix}: Not found[/yellow]")
-            return False
-        if status in (400, 422):
-            console.print(f"[red]{error_prefix}: Validation error[/red]")
-            console.print(f"  [dim]{error}[/dim]")
-            return False
-        if status >= 500:
-            console.print(f"[red]{error_prefix}: Server error (HTTP {status})[/red]")
-            console.print(f"  [dim]{error}[/dim]")
-            return False
-        console.print(f"[red]{error_prefix} (HTTP {status}):[/red] {error}")
-        return False
-
-    # No status available — fall back to the legacy substring heuristics.
-    error_str = str(raw_error).lower()
-    if "401" in error_str or "unauthorized" in error_str or "not authenticated" in error_str:
-        console.print(f"[red]{error_prefix}: Authentication required[/red]")
-        console.print("[dim]Run:[/dim] [cyan]mdf login[/cyan]")
-        return False
-
-    if "403" in error_str or "forbidden" in error_str:
-        console.print(f"[red]{error_prefix}: Permission denied[/red]")
-        return False
-
-    if "429" in error_str or "rate limit" in error_str:
-        console.print(f"[yellow]{error_prefix}: Rate limited — try again shortly[/yellow]")
-        return False
-
-    if "404" in error_str or "not found" in error_str:
-        console.print(f"[yellow]{error_prefix}: Not found[/yellow]")
-        return False
-
-    if "validation" in error_str:
-        console.print(f"[red]{error_prefix}: Validation error[/red]")
-        console.print(f"  [dim]{error}[/dim]")
-        return False
-
-    console.print(f"[red]{error_prefix}:[/red] {error}")
+    info = classify_api_error(result)
+    console.print(
+        theme.error_panel(
+            escape(str(info["message"])),
+            title=error_prefix,
+            code=info["code"],
+            detail=escape(str(info["detail"])) if info["detail"] else None,
+            hint=info["hint"],
+            border=info["border"] or "red",
+        )
+    )
     return False
 
 

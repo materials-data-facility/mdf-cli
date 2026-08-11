@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 import typer
-from rich.console import Console
-from rich.table import Table
+from rich.markup import escape
 
-console = Console()
+from mdf.cli import theme
+from mdf.cli.theme import console
 
 # Bundles shipped inside the wheel under src/mdf/skills/
 BUNDLED_SKILLS = ["mdf-publish"]
@@ -114,14 +114,22 @@ def skill_install(
         mdf skill install --agent gemini --target ~/.gemini/skills/mdf-publish
     """
     if name not in BUNDLED_SKILLS:
-        console.print(f"[red]Unknown skill:[/red] {name}")
-        console.print(f"[dim]Available:[/dim] {', '.join(BUNDLED_SKILLS)}")
+        console.print(theme.error_panel(
+            f"Unknown skill: {escape(str(name))}",
+            title="Unknown skill",
+            detail=f"Available: {', '.join(BUNDLED_SKILLS)}",
+            hint="run `mdf skill list` to see the bundled skills",
+        ))
         raise typer.Exit(code=1)
 
     source = _bundle_path(name)
     if not source.is_dir():
-        console.print(f"[red]Packaged skill not found:[/red] {source}")
-        console.print("[dim]The installed mdf-cli build may be missing its skill data.[/dim]")
+        console.print(theme.error_panel(
+            f"Packaged skill not found: {escape(str(source))}",
+            title="Bundle missing",
+            detail="The installed mdf-cli build may be missing its skill data.",
+            hint="reinstall with `pip install --force-reinstall mdf-cli`",
+        ))
         raise typer.Exit(code=1)
 
     selected = _selected_agents(agent)
@@ -142,17 +150,25 @@ def skill_install(
         )
 
         if destination.exists() and any(destination.iterdir()) and not force:
-            console.print(f"[yellow]Already installed ({selected_agent}):[/yellow] {destination}")
-            console.print("[dim]Re-run with [/dim][cyan]--force[/cyan][dim] to overwrite.[/dim]")
+            console.print(theme.check_line(
+                "active",
+                f"Already installed ({escape(selected_agent)})",
+                detail=escape(str(destination)),
+                hint="re-run with --force to overwrite",
+                indent=0,
+            ))
             failures = True
             continue
 
         destination.mkdir(parents=True, exist_ok=True)
         _copy_bundle(source, destination)
-        console.print(
-            f"[green]Installed[/green] [bold]{name}[/bold] for [bold]{selected_agent}[/bold] "
-            f"[dim]->[/dim] {destination}; invoke with [cyan]/mdf-publish[/cyan]"
-        )
+        console.print(theme.mark(
+            "ok",
+            f"Installed [bold]{escape(name)}[/bold] for [bold]{escape(selected_agent)}[/bold]",
+            style=None,
+        ))
+        console.print(f"    [secondary]→ {escape(str(destination))}[/secondary]")
+        console.print(f"    [hint]invoke with /{escape(name)}[/hint]")
 
     if failures:
         raise typer.Exit(code=1)
@@ -164,19 +180,27 @@ def skill_path(
 ):
     """Print the location of a packaged skill bundle."""
     if name not in BUNDLED_SKILLS:
-        console.print(f"[red]Unknown skill:[/red] {name}")
+        console.print(theme.error_panel(
+            f"Unknown skill: {escape(str(name))}",
+            title="Unknown skill",
+            hint="run `mdf skill list` to see the bundled skills",
+        ))
         raise typer.Exit(code=1)
+    # Raw path on stdout: this output is meant to be piped into other commands.
     print(_bundle_path(name))
 
 
 @app.command("list")
 def skill_list():
     """List the skill bundles shipped with mdf-cli."""
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Skill")
-    table.add_column("Packaged", style="dim")
+    table = theme.table()
+    table.add_column("Skill", style="id")
+    table.add_column("Packaged", style="secondary")
     for name in BUNDLED_SKILLS:
         path = _bundle_path(name)
-        table.add_row(name, str(path) if path.is_dir() else "[red]missing[/red]")
+        table.add_row(
+            escape(name),
+            escape(str(path)) if path.is_dir() else theme.mark("err", "missing"),
+        )
     console.print(table)
-    console.print("\n[dim]Install with:[/dim] [cyan]mdf skill install[/cyan]")
+    console.print("\n[hint]hint: install with `mdf skill install`[/hint]")

@@ -5,17 +5,15 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import typer
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich import box
+from rich.markup import escape
 
 from mdf.core.backend_client import BackendClient
 from mdf.core.config import resolve_service
+from mdf.cli import theme
 from mdf.cli.formatting import format_result_or_json, format_status_badge, handle_api_result
+from mdf.cli.theme import console
 
 app = typer.Typer(help="Interact with MDF backend (v2) API")
-console = Console()
 _auth_opts: Dict[str, Optional[str]] = {"service": None, "token": None, "dev_user": None}
 _STREAMING_DISABLED_MESSAGE = "file streaming is disabled in the current MDF release"
 
@@ -59,7 +57,12 @@ def _print(result):
 
 
 def _streaming_disabled() -> None:
-    console.print(f"[yellow]{_STREAMING_DISABLED_MESSAGE}[/yellow]")
+    console.print(theme.check_line(
+        "idle",
+        _STREAMING_DISABLED_MESSAGE,
+        hint="publish files with `mdf publish` instead",
+        indent=0,
+    ))
     raise typer.Exit(code=1)
 
 
@@ -77,8 +80,8 @@ def health(
         _print(result)
     elif healthy:
         service = result.get("service")
-        suffix = f" [dim]({service})[/dim]" if service else ""
-        console.print(f"[green]Backend is healthy[/green]{suffix}")
+        suffix = f" [secondary]({escape(str(service))})[/secondary]" if service else ""
+        console.print(theme.mark("ok", "Backend is healthy", style="ok") + suffix)
     else:
         handle_api_result(result, error_prefix="Health check failed")
     if not healthy:
@@ -99,7 +102,11 @@ def submit(
         _print(result)
     else:
         if result.get("success"):
-            console.print(f"[green]Submitted:[/green] {result.get('source_id')} v{result.get('version')}")
+            console.print(theme.mark(
+                "ok",
+                f"Submitted: {theme.ident(result.get('source_id'))} v{escape(str(result.get('version')))}",
+                style=None,
+            ))
         else:
             handle_api_result(result, error_prefix="Submit failed")
 
@@ -119,8 +126,10 @@ def status(
     else:
         sub = result.get("submission") or result
         if sub.get("source_id"):
-            console.print(f"[cyan]{sub.get('source_id')}[/cyan] v{sub.get('version', '?')}")
-            console.print(f"  Status: {format_status_badge(sub.get('status', 'unknown'))}")
+            console.print(
+                f"{theme.ident(sub.get('source_id'))} [secondary]v{escape(str(sub.get('version', '?')))}[/secondary]"
+            )
+            console.print(f"  [label]Status:[/label] {format_status_badge(sub.get('status', 'unknown'))}")
         else:
             handle_api_result(result, error_prefix="Status lookup")
 
@@ -140,8 +149,12 @@ def submissions(
         subs = result.get("submissions", [])
         if subs:
             console.print(f"\n[bold]{len(subs)} submission(s):[/bold]")
-            for s in subs:
-                console.print(f"  {s.get('source_id', '')} v{s.get('version', '?')} — {format_status_badge(s.get('status', ''))}")
+            for item in subs:
+                console.print(
+                    f"  {theme.ident(item.get('source_id', ''))} "
+                    f"[secondary]v{escape(str(item.get('version', '?')))}[/secondary] — "
+                    f"{format_status_badge(item.get('status', ''))}"
+                )
         else:
             handle_api_result(result, error_prefix="Submissions")
 
@@ -163,10 +176,15 @@ def curation_pending(
         subs = result.get("submissions", [])
         if subs:
             console.print(f"\n[bold]Pending curation ({len(subs)}):[/bold]")
-            for s in subs:
-                console.print(f"  {s.get('source_id', '')} — {s.get('title', 'Untitled')}")
+            for item in subs:
+                console.print(
+                    f"  {theme.ident(item.get('source_id', ''))} — "
+                    f"{escape(str(item.get('title', 'Untitled')))}"
+                )
         else:
-            console.print("[dim]No datasets pending curation.[/dim]")
+            console.print(theme.empty_panel(
+                "No datasets pending curation.", title="queue empty"
+            ))
 
 
 @app.command("curation-detail")
@@ -262,7 +280,9 @@ def stream_create(
         _print(result)
     else:
         if result.get("success"):
-            console.print(f"[green]Stream created:[/green] {result.get('stream_id')}")
+            console.print(theme.mark(
+                "ok", f"Stream created: {theme.ident(result.get('stream_id'))}", style=None
+            ))
         else:
             handle_api_result(result, error_prefix="Stream create failed")
 
@@ -307,10 +327,9 @@ def stream_status(
         _print(result)
     else:
         if result.get("success"):
-            s = result
-            console.print(f"[cyan]{s.get('stream_id', stream_id)}[/cyan]")
-            console.print(f"  Status: {format_status_badge(s.get('status', 'unknown'))}")
-            console.print(f"  Files: {s.get('file_count', 0)}")
+            console.print(theme.ident(result.get("stream_id", stream_id)))
+            console.print(f"  [label]Status:[/label] {format_status_badge(result.get('status', 'unknown'))}")
+            console.print(f"  [label]Files:[/label] {theme.number(result.get('file_count', 0))}")
         else:
             handle_api_result(result, error_prefix="Stream status")
 
@@ -406,49 +425,51 @@ def card(
     client.close()
 
     if not result.get("success"):
-        console.print(f"[red]Error:[/red] {result.get('error', 'Unknown error')}")
+        handle_api_result(result, error_prefix="Card failed")
         raise typer.Exit(1)
 
     c = result.get("card", {})
 
     # Title and basic info
     console.print()
-    console.print(Panel(
-        f"[bold]{c.get('title', 'Untitled')}[/bold]\n"
-        f"[dim]{c.get('description', 'No description')}[/dim]",
-        title=f"[cyan]{c.get('source_id')}[/cyan] v{c.get('version', '1.0')}",
-        border_style="blue",
+    console.print(theme.panel(
+        f"[bold]{escape(str(c.get('title', 'Untitled')))}[/bold]\n"
+        f"[secondary]{escape(str(c.get('description', 'No description')))}[/secondary]",
+        title=f"{theme.SCIENCE} {escape(str(c.get('source_id')))}",
+        subtitle=f"v{c.get('version', '1.0')}",
     ))
 
     # Metadata table
-    table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
-    table.add_column("Field", style="dim", width=15)
-    table.add_column("Value")
+    table = theme.detail_table()
 
     if c.get("authors"):
-        table.add_row("Authors", ", ".join(c["authors"]))
+        table.add_row("Authors", escape(", ".join(c["authors"])))
     if c.get("publisher"):
-        table.add_row("Publisher", c["publisher"])
+        table.add_row("Publisher", escape(str(c["publisher"])))
     if c.get("publication_year"):
-        table.add_row("Year", str(c["publication_year"]))
+        table.add_row("Year", theme.number(c["publication_year"]))
     if c.get("organization"):
-        table.add_row("Organization", c["organization"])
+        table.add_row("Organization", escape(str(c["organization"])))
     if c.get("lab_id"):
-        table.add_row("Lab ID", c["lab_id"])
+        table.add_row("Lab ID", theme.ident(c["lab_id"]))
     if c.get("keywords"):
-        table.add_row("Keywords", ", ".join(c["keywords"]))
+        table.add_row("Keywords", escape(", ".join(c["keywords"])))
     if c.get("methods"):
-        table.add_row("Methods", ", ".join(c["methods"]))
+        table.add_row("Methods", escape(", ".join(c["methods"])))
     if c.get("doi"):
-        table.add_row("DOI", f"https://doi.org/{c['doi']}")
-    table.add_row("Status", f"[green]{c.get('status', 'unknown')}[/green]")
+        table.add_row("DOI", f"https://doi.org/{escape(str(c['doi']))}")
+    table.add_row("Status", format_status_badge(c.get("status", "unknown")))
 
     console.print(table)
 
     # Stats
     stats = c.get("stats", {})
     if stats:
-        console.print(f"\n[dim]Files:[/dim] {stats.get('data_sources_count', 0)} sources | Types: {', '.join(stats.get('file_types', []))}")
+        console.print(
+            f"\n[label]Files:[/label] {theme.number(stats.get('data_sources_count', 0))} sources "
+            f"[secondary]|[/secondary] [label]Types:[/label] "
+            f"{escape(', '.join(stats.get('file_types', [])))}"
+        )
 
     console.print()
 
@@ -473,7 +494,7 @@ def cite(
     client.close()
 
     if not result.get("success"):
-        console.print(f"[red]Error:[/red] {result.get('error', 'Unknown error')}")
+        handle_api_result(result, error_prefix="Citation failed")
         raise typer.Exit(1)
 
     # Get the citation text
@@ -481,17 +502,25 @@ def cite(
 
     if output:
         output.write_text(citation_text)
-        console.print(f"[green]Citation saved to:[/green] {output}")
+        console.print(theme.mark("ok", f"Citation saved to: {escape(str(output))}", style=None))
     else:
+        lexers = {"bibtex": "bibtex", "ris": "text", "datacite": "xml"}
+        titles = {
+            "bibtex": "BibTeX",
+            "ris": "RIS",
+            "datacite": "DataCite XML",
+            "apa": "APA Citation",
+        }
+        lexer = lexers.get(format)
+        body = (
+            theme.syntax(citation_text, lexer, word_wrap=True)
+            if lexer
+            else escape(citation_text)
+        )
         console.print()
-        if format == "bibtex":
-            console.print(Panel(citation_text, title="BibTeX", border_style="green"))
-        elif format == "ris":
-            console.print(Panel(citation_text, title="RIS", border_style="green"))
-        elif format == "datacite":
-            console.print(Panel(citation_text, title="DataCite XML", border_style="green"))
-        else:
-            console.print(Panel(citation_text, title="APA Citation", border_style="green"))
+        console.print(theme.panel(
+            body, title=titles.get(format, "APA Citation"), subtitle=source_id
+        ))
         console.print()
 
 
