@@ -57,6 +57,7 @@ from mdf.cli.config_cmd import app as config_app
 from mdf.cli.dataset_cmd import app as dataset_app
 from mdf.cli.admin_cmd import app as admin_app
 from mdf.cli.skill_cmd import app as skill_app
+from mdf.cli.mcp_cmd import app as mcp_app
 from mdf.cli.preflight import (
     auth_ready,
     run_preflight,
@@ -109,6 +110,7 @@ app.add_typer(dataset_app, name="dataset", rich_help_panel=PANEL_MORE)
 app.add_typer(admin_app, name="admin", rich_help_panel=PANEL_MORE)
 app.add_typer(config_app, name="config", rich_help_panel=PANEL_MORE)
 app.add_typer(skill_app, name="skill", rich_help_panel=PANEL_MORE)
+app.add_typer(mcp_app, name="mcp", help="Model Context Protocol server for AI assistants")
 
 # Hidden sub-apps
 app.add_typer(backend_app, name="backend", hidden=True)
@@ -557,14 +559,20 @@ def _render_clone_plan(plan: Dict[str, Any]) -> None:
     detail.add_row("Title", escape(str(plan.get("title") or "Untitled")))
     detail.add_row("Destination", escape(str(plan.get("output_path"))))
     detail.add_row("Method", escape(_clone_method_label(plan.get("selected_method", ""))))
+    file_count = plan.get("file_count", plan.get("files_count"))
+    if file_count is not None:
+        detail.add_row("Files", theme.number(file_count))
+    total_size = plan.get("total_bytes") or plan.get("archive_size")
+    if total_size is not None:
+        detail.add_row("Total size", theme.number(_human_size(total_size)))
     if plan.get("version"):
         detail.add_row("Version", escape(str(plan["version"])))
+    auth_needed = plan.get("auth_needed", plan.get("auth_required"))
+    if auth_needed is None:
+        auth_needed = plan.get("selected_method") == "transfer"
+    detail.add_row("Auth needed?", "yes" if auth_needed else "no")
     if plan.get("requested_identifier") != plan.get("resolved_source_id"):
         detail.add_row("Requested", escape(str(plan.get("requested_identifier"))))
-    if plan.get("archive_available") and plan.get("archive_size"):
-        detail.add_row("Archive", theme.number(_human_size(plan["archive_size"])))
-    elif plan.get("file_count"):
-        detail.add_row("Files", theme.number(plan["file_count"]))
     console.print()
     console.print(theme.panel(detail, title="Clone plan"))
 
@@ -1303,6 +1311,7 @@ def clone(
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Specific version to clone"),
     transfer: bool = typer.Option(False, "--transfer", help="Use Globus Transfer (requires GCP)"),
     derive: bool = typer.Option(False, "--derive", help="Create mdf.yaml with derived-from lineage"),
+    plan_only: bool = typer.Option(False, "--plan", "--dry-run", help="Show the clone plan without downloading"),
     json_output: bool = typer.Option(False, "--json", help="JSON output"),
     service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
     token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
@@ -1319,6 +1328,7 @@ def clone(
         mdf clone my_dataset_v1.1 ./local_copy
         mdf clone my_dataset_v1.1 --transfer
         mdf clone my_dataset_v1.1 --derive
+        mdf clone my_dataset_v1.1 --plan
     """
     resolved = resolve_service(service)
     method = "transfer" if transfer else "auto"
@@ -1355,6 +1365,11 @@ def clone(
             headline += f" [secondary]v{escape(str(version))}[/secondary]"
         console.print(headline)
         _render_clone_plan(plan)
+
+    if plan_only:
+        if json_output:
+            json_ok({"plan": plan})
+        return
 
     resolved_id_label = str(plan.get("resolved_source_id", source_id))
     transfer_ui = theme.TransferProgress(
@@ -2882,7 +2897,7 @@ def update_alias(
 
 @app.command("import", rich_help_panel=PANEL_PUBLISH)
 def import_external(
-    identifier: str = typer.Argument(..., help="External identifier (e.g. zenodo:12345, https://zenodo.org/records/12345)"),
+    identifier: str = typer.Argument(..., help="External identifier (Zenodo record or DOI)"),
     output_dir: Optional[str] = typer.Option(None, "--output", "-o", help="Output directory for downloaded files"),
     dry_run: bool = typer.Option(True, "--dry-run/--submit", help="Preview metadata without downloading"),
     test: bool = typer.Option(False, "--test", help="Submit to test environment"),
@@ -2893,13 +2908,14 @@ def import_external(
     token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
     dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
 ):
-    """Import a dataset from an external repository (Zenodo, etc.).
+    """Import a dataset from an external repository or a DataCite DOI.
 
     Fetches metadata and data files, then publishes to MDF with
     provenance linking back to the original source.
 
     Examples:
         mdf import zenodo:12345                    # preview metadata
+        mdf import 10.18126/e73h-3w6n              # preview DataCite metadata
         mdf import zenodo:12345 --submit           # download + submit
         mdf import zenodo:12345 -o ./data --submit # custom output dir
     """
@@ -2907,11 +2923,17 @@ def import_external(
 
     adapter = resolve_adapter(identifier)
     if not adapter:
+        if json_output:
+            json_fail(
+                kind="validation",
+                message=f"No adapter found for: {identifier}",
+                hint="use a DOI, zenodo:ID, or a public Zenodo record URL",
+            )
         console.print()
         console.print(theme.error_panel(
             f"No adapter found for: {escape(str(identifier))}",
             title="Unsupported source",
-            detail="Supported formats: zenodo:ID, https://zenodo.org/records/ID",
+            detail="Supported formats: DOI, doi:DOI, https://doi.org/DOI, zenodo:ID, Zenodo record URL",
             hint="check the identifier, or open an issue to request a new repository adapter",
         ))
         raise typer.Exit(code=1)
@@ -2996,10 +3018,16 @@ def import_external(
 
     try:
         with download:
+            import_metadata = dict(metadata)
+            provenance = import_metadata.get("external_source")
+            if isinstance(provenance, dict):
+                import_metadata["external_source"] = provenance.get("source") or adapter.name()
+                import_metadata.setdefault("doi", provenance.get("doi"))
+                import_metadata.setdefault("url", provenance.get("url"))
             result = agent.import_external(
                 identifier=identifier,
                 output_dir=output_dir,
-                metadata=metadata,
+                metadata=import_metadata,
                 progress_callback=download.on_progress,
                 on_files_resolved=download.on_files_resolved,
                 on_file_done=download.on_file_done,
@@ -3025,6 +3053,9 @@ def import_external(
 
     # Now publish using the generated manifest (includes upload to MDF storage)
     manifest = result["manifest"]
+    manifest.publication_year = metadata.get("publication_year")
+    manifest.license = metadata.get("license")
+    manifest.related_works = metadata.get("related_works")
     agent_pub = MDFAgent(root=Path(result["output_dir"]), manifest=manifest)
 
     if not json_output:

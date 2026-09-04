@@ -1503,6 +1503,7 @@ class MDFAgent:
         token: Optional[str],
         service_instance: Optional[str],
         dev_user_id: Optional[str],
+        create_dirs: bool = True,
     ):
         """Pick the client for a clone: anonymous first for public datasets.
 
@@ -1522,7 +1523,7 @@ class MDFAgent:
         if token is None and dev_user_id is None and method != "transfer":
             anon_client = self._make_anonymous_client(api_url=api_url, service_instance=service_instance)
             try:
-                candidate = self._prepare_clone(anon_client, source_id, output_dir, version, method)
+                candidate = self._prepare_clone(anon_client, source_id, output_dir, version, method, create_dirs=create_dirs)
                 if candidate.get("success") and candidate.get("selected_method") != "transfer":
                     return anon_client, candidate, True
             except Exception:
@@ -1555,10 +1556,11 @@ class MDFAgent:
         client, plan, used_anonymous = self._client_for_clone(
             source_id, output_dir, version, method,
             api_url=api_url, token=token, service_instance=service_instance, dev_user_id=dev_user_id,
+            create_dirs=False,
         )
         try:
             if plan is None:
-                plan = self._prepare_clone(client, source_id, output_dir, version, method)
+                plan = self._prepare_clone(client, source_id, output_dir, version, method, create_dirs=False)
         finally:
             client.close()
 
@@ -1586,6 +1588,7 @@ class MDFAgent:
         output_dir: str,
         version: Optional[str],
         method: str,
+        create_dirs: bool = True,
     ) -> Dict[str, Any]:
         requested_identifier = source_id
 
@@ -1630,7 +1633,8 @@ class MDFAgent:
         transfer_token = client._globus_transfer_token or ""
 
         out = Path(output_dir).resolve()
-        out.mkdir(parents=True, exist_ok=True)
+        if create_dirs:
+            out.mkdir(parents=True, exist_ok=True)
 
         is_directory_url = bool(download_url and download_url.rstrip("?").endswith("/"))
         archive_available = bool(download_url and not is_directory_url)

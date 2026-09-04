@@ -6,6 +6,14 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 
+class ExternalImportError(RuntimeError):
+    """A user-facing failure while resolving an external repository record."""
+
+
+class ExternalRecordNotFoundError(ExternalImportError):
+    """The identifier is valid, but the external metadata service has no record."""
+
+
 class ExternalRepoAdapter(ABC):
     """Base class for adapters that fetch metadata from external repositories."""
 

@@ -12,6 +12,9 @@ pip install mdf-cli
 
 # With metadata extractors (PDF, CSV, Excel)
 pip install "mdf-cli[extractors]"
+
+# With the MCP server for AI assistants
+pip install "mdf-cli[mcp]"
 ```
 
 See [Development](#development) below for an editable/source install.
@@ -52,6 +55,62 @@ mdf skill install --project          # into ./.claude/skills/ instead
 
 Then invoke `/mdf-publish` from the target agent. See `src/mdf/skill/skill.md`
 for the full list of handler actions it exposes.
+
+## AI assistants (MCP)
+
+`mdf mcp serve` runs a [Model Context Protocol](https://modelcontextprotocol.io)
+server that exposes MDF to any MCP client — Claude Code, Claude Desktop, Cursor,
+or a lab agent — so an assistant can search and cite datasets directly.
+
+```bash
+pip install "mdf-cli[mcp]"
+
+# Print the config snippet for your client (it does not edit any file)
+mdf mcp install --client claude-code      # or claude-desktop / cursor
+mdf mcp install --client claude-code > .mcp.json
+```
+
+For Claude Code, the snippet is the contents of `.mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "mdf": {
+      "command": "/path/to/mdf",
+      "args": ["mcp", "serve"],
+      "env": { "MDF_SERVICE": "staging" }
+    }
+  }
+}
+```
+
+stdout carries the JSON only, so `mdf mcp install | jq .` works; the target file
+path and the client's own one-liner are printed to stderr.
+
+**Tools** (all read-only):
+
+| Tool | What it does |
+| --- | --- |
+| `search_datasets` | Keyword or browse search with `year` / `organization` / `author` / `keyword` / `domain` filters and `sort`; returns compact records plus the facet values the filters accept |
+| `get_dataset_card` | One dataset's full metadata card (prefers the API's compact `format=agent` card) |
+| `get_citation` | APA, BibTeX or RIS citation |
+| `list_files` | The dataset's file listing (name, size, format) |
+| `get_sample` | A small sample of the data |
+| `get_versions` | Version history with per-version status and DOI |
+| `resolve_doi` | DOI (bare, `doi:`, or `doi.org` URL) → MDF `source_id` |
+
+**Read-only by construction.** Every tool is a GET against the public v2 API
+through an anonymous client: the server never logs in, never sees your
+credentials, and cannot publish, edit, curate or withdraw anything. Publishing
+stays a human action via `mdf publish` (or the `/mdf-publish` skill above).
+
+Service selection follows the CLI: `--service` / `--api-url` on `mdf mcp serve`,
+otherwise `MDF_API_URL`, `MDF_SERVICE`, then your `mdf config` default.
+`mdf mcp install` pins whichever it resolved into the snippet's `env`.
+
+Tools return compact JSON. Failures come back as
+`{"error": {"kind", "message", "hint"}}` using the same error vocabulary the CLI
+prints, so an assistant can act on them instead of surfacing a traceback.
 
 ## CLI commands
 

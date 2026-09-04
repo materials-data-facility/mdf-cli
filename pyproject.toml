@@ -36,6 +36,9 @@ extractors = [
   "pandas>=2.0",
   "openpyxl>=3.1",
 ]
+mcp = [
+  "mcp>=1.2",
+]
 
 [project.scripts]
 mdf = "mdf.cli.main:app"
