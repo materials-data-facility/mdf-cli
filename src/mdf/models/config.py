@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -147,9 +148,32 @@ class ManifestConfig(BaseModel):
             payload["domains"] = self.domains
 
         # External import provenance. The v2 backend (cs/aws/v2/metadata.py) reads
-        # these as flat top-level keys, so emit them flat (only the ones that are set).
-        if self.external_doi:
-            payload["external_doi"] = self.external_doi
+        # these as flat top-level keys and folds them into `ExternalSource`
+        # (source defaulting to "Unknown"), so emit them flat.
+        #
+        # `dataset_doi` is NOT external provenance: it is this dataset's own DOI
+        # (see DataCite.from_manifest, which uses it as the record identifier).
+        # `DatasetMetadata` has no `dataset_doi` field, so mapping it to
+        # `external_doi` would fabricate a "mirror of another repository" claim.
+        # It is therefore only forwarded when the manifest actually declares an
+        # external source, and dropped with a warning otherwise.
+        declares_external = bool(self.external_source or self.external_url)
+        external_doi = self.external_doi
+        if not external_doi and self.dataset_doi:
+            if declares_external:
+                external_doi = self.dataset_doi
+            else:
+                warnings.warn(
+                    "manifest 'dataset_doi' was dropped: the MDF v2 metadata schema has "
+                    "no dataset_doi field, and emitting it as external_doi would claim "
+                    "this dataset mirrors another repository. Set 'external_source' "
+                    "(and optionally 'external_url') to declare mirrored provenance, or "
+                    "list the DOI under 'related_dois'/'related_works'.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        if external_doi:
+            payload["external_doi"] = external_doi
         if self.external_url:
             payload["external_url"] = self.external_url
         if self.external_source:
@@ -219,5 +243,8 @@ class ManifestConfig(BaseModel):
                     extensions[k] = v
         if extensions:
             payload["extensions"] = extensions
+
+        if self.dc:
+            payload["dc"] = self.dc
 
         return payload

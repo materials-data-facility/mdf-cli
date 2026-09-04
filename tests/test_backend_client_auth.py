@@ -114,3 +114,103 @@ def test_authenticated_uses_confidential_credentials(monkeypatch):
 def test_api_url_for_service_respects_env_override(monkeypatch):
     monkeypatch.setenv("MDF_API_URL", "https://override.example")
     assert _api_url_for_service("prod") == "https://override.example"
+
+
+# ---------------------------------------------------------------------------
+# Groups token
+#
+# The server derives group memberships — and therefore submitter and
+# curator-by-group rights — only from the Groups token we send in
+# X-Groups-Token. It cannot fetch one itself: its dependent-token exchange is
+# performed by a confidential client that is a different Globus app from the MDF
+# Connect resource server, so Globus rejects that grant. So requesting the
+# Groups scope at login, and forwarding the token, is load-bearing.
+# ---------------------------------------------------------------------------
+
+
+class _FakeUserApp:
+    """Captures the scope requirements a UserApp is built with."""
+
+    instances: list = []
+
+    def __init__(self, app_name, client_id=None, config=None):
+        self.scope_reqs: Dict[str, Any] = {}
+        _FakeUserApp.instances.append(self)
+
+    def add_scope_requirements(self, reqs):
+        self.scope_reqs.update(reqs)
+
+    def login_required(self):
+        return False
+
+    def login(self):  # pragma: no cover - login_required() is False
+        raise AssertionError("should not need an interactive login")
+
+    def get_authorizer(self, resource_server):
+        return SimpleNamespace(
+            get_authorization_header=lambda: f"Bearer tok-{resource_server}"
+        )
+
+
+def test_is_logged_in_requires_the_groups_scope(monkeypatch, tmp_path):
+    """A token store predating the Groups scope must not count as logged in.
+
+    Otherwise the CLI authenticates fine and then silently 403s on submit and
+    curation, because it has no Groups token to forward.
+    """
+    from mdf.auth import globus as globus_auth
+
+    _FakeUserApp.instances = []
+    monkeypatch.setattr(globus_auth, "UserApp", _FakeUserApp)
+    monkeypatch.setattr(globus_auth, "JSONTokenStorage", lambda path: SimpleNamespace())
+    monkeypatch.setattr(globus_auth, "GlobusAppConfig", lambda **kwargs: SimpleNamespace())
+
+    token_path = tmp_path / "tokens.json"
+    token_path.write_text("{}")
+
+    assert globus_auth.is_logged_in(service_instance="staging", token_path=token_path) is True
+
+    reqs = _FakeUserApp.instances[-1].scope_reqs
+    assert reqs["groups.api.globus.org"] == [globus_auth.GROUPS_SCOPE]
+    # The connect scope is still required alongside it, not replaced.
+    scope, resource_server = globus_auth.get_scopes_for_service("staging")
+    assert reqs[resource_server] == [scope]
+
+
+def test_is_logged_in_false_without_a_token_file(tmp_path):
+    from mdf.auth import globus as globus_auth
+
+    assert (
+        globus_auth.is_logged_in(
+            service_instance="staging", token_path=tmp_path / "missing.json"
+        )
+        is False
+    )
+
+
+def test_interactive_login_requests_groups_and_sends_the_header(monkeypatch):
+    """The interactive path must both ask for the Groups scope and forward it."""
+    from mdf.auth import globus as globus_auth
+
+    monkeypatch.delenv("MDF_CONNECT_TOKEN", raising=False)
+    monkeypatch.delenv("MDF_DEV_USER_ID", raising=False)
+    monkeypatch.delenv("MDF_CLIENT_ID", raising=False)
+    monkeypatch.delenv("MDF_CLIENT_SECRET", raising=False)
+
+    _FakeUserApp.instances = []
+    monkeypatch.setattr(globus_auth, "UserApp", _FakeUserApp)
+    monkeypatch.setattr(globus_auth, "JSONTokenStorage", lambda path: SimpleNamespace())
+    monkeypatch.setattr(globus_auth, "GlobusAppConfig", lambda **kwargs: SimpleNamespace())
+
+    client = BackendClient.authenticated(
+        base_url="https://example.org", service_instance="staging"
+    )
+
+    requested = _FakeUserApp.instances[-1].scope_reqs
+    assert requested["groups.api.globus.org"] == [globus_auth.GROUPS_SCOPE]
+    assert client._groups_token == "tok-groups.api.globus.org"
+
+    recorder = _RecordingHTTPClient()
+    client._client = recorder  # type: ignore[assignment]
+    client.curation_pending()
+    assert recorder.last_headers["X-Groups-Token"] == "tok-groups.api.globus.org"

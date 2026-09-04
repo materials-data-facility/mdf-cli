@@ -13,7 +13,7 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from mdf.cli import theme
-from mdf.cli.formatting import classify_api_error, handle_api_result
+from mdf.cli.formatting import EXIT_NETWORK, classify_api_error, handle_api_result
 from mdf.cli.main import app
 from mdf.core.backend_client import ApiResult
 
@@ -145,7 +145,7 @@ class TestMachineOutputStaysPlain:
             def close(self):
                 return None
 
-            def search(self, query, search_type="all", limit=20):
+            def search(self, query, search_type="all", limit=20, **kwargs):
                 return ApiResult(
                     {"query": query, "total": 1, "results": [{"type": "dataset", "title": "T"}]},
                     status_code=200,
@@ -162,7 +162,7 @@ class TestMachineOutputStaysPlain:
             def close(self):
                 return None
 
-            def search(self, query, search_type="all", limit=20):
+            def search(self, query, search_type="all", limit=20, **kwargs):
                 return ApiResult({"query": query, "total": 0, "results": []}, status_code=200)
 
         monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: FakeClient())
@@ -176,13 +176,15 @@ class TestMachineOutputStaysPlain:
             def close(self):
                 return None
 
-            def search(self, query, search_type="all", limit=20):
+            def search(self, query, search_type="all", limit=20, **kwargs):
                 return {"success": False, "error": "Connection failed after 4 attempts: refused"}
 
         monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: FakeClient())
         result = runner.invoke(app, ["search", "perovskite"])
         assert "Search failed" in result.stdout
         assert "No results found" not in result.stdout
+        # A failed lookup must not exit 0 — it maps to the network/service code.
+        assert result.exit_code == EXIT_NETWORK
 
 
 class TestPublishFlowRendering:
@@ -269,7 +271,9 @@ class TestPublishFlowRendering:
                 "--submit",
             ],
         )
-        assert result.exit_code == 1
+        # A failed transfer now exits through the shared table (5 = network /
+        # service), the same code `--json` reports for it.
+        assert result.exit_code == 5
         assert "Upload failed" in result.stdout
         assert "upload aborted at 40%" in result.stdout
         assert "hint:" in result.stdout

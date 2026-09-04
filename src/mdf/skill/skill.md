@@ -7,10 +7,9 @@ has the implementations). Every action returns `{"success": bool, ...}` and neve
 Backend-hitting actions accept the same auth/targeting kwargs: `api_url`, `token`,
 `service_instance`, `dev_user_id` — omitted below for brevity.
 
-Stream actions (`mdf_stream_*`) call backend endpoints that are currently **disabled** on
-the live MDF Connect backend (file streaming is off for the initial v2 release — see
-`cli/stream.py`'s `_DISABLED_MESSAGE`). They exist in the tool registry but will error
-against staging/prod today.
+File streaming (`mdf_stream_*`) was **removed** from this release: the backend stream
+router is unmounted. Publish by reference instead — pass Globus/HTTPS URLs as
+`data_sources`.
 
 ## Publish flow
 - `mdf_scan_folder(path)` — extract metadata from every file under `path` via the extractor registry.
@@ -18,13 +17,6 @@ against staging/prod today.
 - `mdf_suggest_mappings(headers)` — heuristic column-name → MDF schema field suggestions.
 - `mdf_validate_and_preview(path)` — load a manifest, run validation, and build the submission payload without sending it.
 - `mdf_publish(path, test=False, update=False, submit=False)` — publish from a manifest at `path`; dry-run unless `submit=True`; `update=True` targets an existing dataset.
-
-## Streams (disabled on live backend — see note above)
-- `mdf_stream_create(title, lab_id=None, organization=None)` — open a new stream.
-- `mdf_stream_append(stream_id, files=None, file_count=None, total_bytes=None)` — append a batch of files to an open stream.
-- `mdf_stream_status(stream_id)` — get a stream's current state.
-- `mdf_stream_close(stream_id, mint_doi=None, title=None, description=None, authors=None, keywords=None, license=None)` — finalize a stream into a submission.
-- `mdf_stream_snapshot(stream_id, title=None, update=False)` — submit the stream's current contents as a snapshot without closing it.
 
 ## Search / discovery
 - `mdf_check_status(source_id, version=None)` — submission status for a dataset.

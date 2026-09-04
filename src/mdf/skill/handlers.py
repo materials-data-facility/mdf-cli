@@ -9,6 +9,11 @@ from mdf.core.backend_client import BackendClient
 from mdf.extractors.registry import discover_metadata
 
 
+class FeatureUnavailableError(Exception):
+    """Raised when a requested feature is disabled or unavailable."""
+    pass
+
+
 def agent_safe(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -17,6 +22,15 @@ def agent_safe(func):
             if isinstance(result, dict) and "success" not in result:
                 result["success"] = True
             return result
+        except FeatureUnavailableError as exc:
+            # Agent-facing handlers must never raise: report the disabled
+            # feature through the same envelope every other action uses.
+            return {
+                "success": False,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "kind": "feature_unavailable",
+            }
         except Exception as exc:
             return {
                 "success": False,
@@ -118,29 +132,23 @@ def publish(
 
 @agent_safe
 def stream_create(
-    title: str,
+    title: str = "",
     lab_id: str | None = None,
     organization: str | None = None,
     api_url: str | None = None,
     token: str | None = None,
     service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
+    **kwargs,
 ) -> Dict[str, Any]:
-    return _run_backend_action(
-        "stream_create",
-        api_url=api_url,
-        token=token,
-        service_instance=service_instance,
-        dev_user_id=dev_user_id,
-        title=title,
-        lab_id=lab_id,
-        organization=organization,
+    raise FeatureUnavailableError(
+        "Streams are disabled in this release; publish by reference to Globus/HTTPS data_sources"
     )
 
 
 @agent_safe
 def stream_append(
-    stream_id: str,
+    stream_id: str = "",
     files: list | None = None,
     file_count: int | None = None,
     total_bytes: int | None = None,
@@ -148,41 +156,30 @@ def stream_append(
     token: str | None = None,
     service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
+    **kwargs,
 ) -> Dict[str, Any]:
-    return _run_backend_action(
-        "stream_append",
-        api_url=api_url,
-        token=token,
-        service_instance=service_instance,
-        dev_user_id=dev_user_id,
-        stream_id=stream_id,
-        files=files,
-        file_count=file_count,
-        total_bytes=total_bytes,
+    raise FeatureUnavailableError(
+        "Streams are disabled in this release; publish by reference to Globus/HTTPS data_sources"
     )
 
 
 @agent_safe
 def stream_status(
-    stream_id: str,
+    stream_id: str = "",
     api_url: str | None = None,
     token: str | None = None,
     service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
+    **kwargs,
 ) -> Dict[str, Any]:
-    return _run_backend_action(
-        "stream_status",
-        api_url=api_url,
-        token=token,
-        service_instance=service_instance,
-        dev_user_id=dev_user_id,
-        stream_id=stream_id,
+    raise FeatureUnavailableError(
+        "Streams are disabled in this release; publish by reference to Globus/HTTPS data_sources"
     )
 
 
 @agent_safe
 def stream_close(
-    stream_id: str,
+    stream_id: str = "",
     mint_doi: bool | None = None,
     title: str | None = None,
     description: str | None = None,
@@ -193,42 +190,26 @@ def stream_close(
     token: str | None = None,
     service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
+    **kwargs,
 ) -> Dict[str, Any]:
-    return _run_backend_action(
-        "stream_close",
-        api_url=api_url,
-        token=token,
-        service_instance=service_instance,
-        dev_user_id=dev_user_id,
-        stream_id=stream_id,
-        mint_doi=mint_doi,
-        title=title,
-        description=description,
-        authors=authors,
-        keywords=keywords,
-        license=license,
+    raise FeatureUnavailableError(
+        "Streams are disabled in this release; publish by reference to Globus/HTTPS data_sources"
     )
 
 
 @agent_safe
 def stream_snapshot(
-    stream_id: str,
+    stream_id: str = "",
     title: str | None = None,
     update: bool = False,
     api_url: str | None = None,
     token: str | None = None,
     service_instance: Optional[str] = None,
     dev_user_id: str | None = None,
+    **kwargs,
 ) -> Dict[str, Any]:
-    return _run_backend_action(
-        "stream_snapshot",
-        api_url=api_url,
-        token=token,
-        service_instance=service_instance,
-        dev_user_id=dev_user_id,
-        stream_id=stream_id,
-        title=title,
-        update=update,
+    raise FeatureUnavailableError(
+        "Streams are disabled in this release; publish by reference to Globus/HTTPS data_sources"
     )
 
 

@@ -16,6 +16,7 @@ Usage:
 
 import os
 import sys
+import time
 from pathlib import Path
 
 # Add src to path
@@ -30,6 +31,27 @@ def heading(title):
     print(f"\n{'=' * 60}")
     print(f"  {title}")
     print(f"{'=' * 60}\n")
+
+
+def _wait_for_published(client, source_id, timeout=180, interval=5):
+    """Poll until the async publish worker finishes, or give up.
+
+    Approve only *queues* the publish job (SQS): it returns while status is still
+    'approved' and before the DOI is minted. Reading status straight afterwards
+    reported "status: approved, DOI: None" and then cleanup deleted the record
+    mid-publish — so the run could neither confirm the published+DOI outcome it
+    claims to test nor avoid exercising the unlocked delete-during-publish path.
+    """
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        submission = client.status(source_id).get("submission", {})
+        last = submission.get("status")
+        if last in ("published", "failed"):
+            return submission
+        time.sleep(interval)
+    print(f"  WARNING: still '{last}' after {timeout}s — not waiting further")
+    return client.status(source_id).get("submission", {})
 
 
 def _require_opt_in():
@@ -101,13 +123,16 @@ def main():
         })
         print(f"  Result: {approve_result}\n")
 
-        # Step 5: Check final status — should be published with DOI
-        print("[5] Checking final status...")
-        final_status = client.status(source_id)
-        submission = final_status.get("submission", {})
+        # Step 5: Wait out the async publish worker, then check final status
+        print("[5] Waiting for the publish worker, then checking final status...")
+        submission = _wait_for_published(client, source_id)
         print(f"  Status:       {submission.get('status')}")
         print(f"  DOI:          {submission.get('doi')}")
         print(f"  Published at: {submission.get('published_at')}")
+        assert submission.get("status") == "published", (
+            f"Expected published, got {submission.get('status')}"
+        )
+        assert submission.get("doi"), "Expected a DOI to have been minted"
 
         # Step 6: Get citation
         print("\n[6] Getting citation...")

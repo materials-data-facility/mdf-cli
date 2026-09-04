@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -137,6 +139,9 @@ def test_skill_stream_handlers_use_authenticated_client(monkeypatch):
         return fake_client
 
     monkeypatch.setattr("mdf.skill.handlers.BackendClient.authenticated", fake_authenticated)
+    # Streams are disabled in this release (backend router unmounted): the
+    # agent-facing handler must refuse before touching the network, and refuse
+    # via the standard envelope rather than by raising (it is @agent_safe).
     result = skill_handlers.stream_create(
         "title",
         api_url="https://api.example",
@@ -144,11 +149,9 @@ def test_skill_stream_handlers_use_authenticated_client(monkeypatch):
         service_instance="dev",
         dev_user_id="dev-user",
     )
-
-    assert result["success"] is True
-    assert captured["base_url"] == "https://api.example"
-    assert captured["token"] == "token-1"
-    assert captured["service_instance"] == "dev"
-    assert captured["dev_user_id"] == "dev-user"
+    assert result["success"] is False
+    assert result["kind"] == "feature_unavailable"
+    assert "Streams are disabled" in result["error"]
+    assert captured == {}
 
 

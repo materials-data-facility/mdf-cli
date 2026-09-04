@@ -8,8 +8,10 @@ and related Globus services. It supports both token-based authentication
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Optional
+import webbrowser
 
 from globus_sdk import (
     AccessTokenAuthorizer,
@@ -82,6 +84,81 @@ def get_scopes_for_service(service_instance: Optional[str] = None) -> tuple[str,
     return MDF_CONNECT_SCOPE, MDF_CONNECT_RESOURCE_SERVER
 
 
+def _scope_to_resource_server(scope: str) -> str:
+    """Extract resource server ID from a scope string."""
+    if "/scopes/" in scope:
+        return scope.split("/scopes/")[1].split("/")[0]
+    elif ":" in scope:
+        parts = scope.split(":")
+        return parts[4] if len(parts) > 4 else scope
+    return scope
+
+
+def _build_scope_requirements(scopes: list[str]) -> dict[str, list[str]]:
+    """Build scope requirements mapping resource servers to lists of scopes."""
+    scope_reqs: dict[str, list[str]] = {}
+    for scope in scopes:
+        resource_server = _scope_to_resource_server(scope)
+        if resource_server not in scope_reqs:
+            scope_reqs[resource_server] = []
+        scope_reqs[resource_server].append(scope)
+    return scope_reqs
+
+
+#: Env values that count as "true" for MDF_NO_BROWSER.
+_TRUTHY = {"1", "true", "yes", "on", "y"}
+
+
+def should_open_browser(no_browser: bool = False) -> bool:
+    """Decide whether to auto-open a browser for the OAuth2 code-paste flow.
+
+    Auto-opening is only ever an optimization — the code-paste flow is the real
+    login path. On a headless box ``webbrowser.open`` happily launches a
+    blocking text browser (lynx/w3m) that takes over the terminal, so the user
+    never gets to see or copy the URL. Opt in only when all of:
+
+    * the caller did not pass ``--no-browser``;
+    * ``MDF_NO_BROWSER`` is not set to a truthy value;
+    * stdout is a TTY (not a pipe, CI log, or captured subprocess);
+    * the platform has a real GUI: macOS/Windows, or ``DISPLAY`` /
+      ``WAYLAND_DISPLAY`` is set on Linux/BSD.
+    """
+    if no_browser:
+        return False
+    if not sys.stdout.isatty():
+        return False
+    if (os.environ.get("MDF_NO_BROWSER") or "").strip().lower() in _TRUTHY:
+        return False
+    if sys.platform in ("darwin", "win32", "cygwin"):
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _login_with_browser_fallback(app: UserApp, no_browser: bool = False) -> None:
+    """Run the interactive login flow, printing the URL before touching a browser.
+
+    The URL is ALWAYS printed first: if a browser open blocks (headless text
+    browser) the user has already seen the URL and can act on it.
+    """
+    open_browser = should_open_browser(no_browser)
+
+    if hasattr(app, "_login_flow_manager"):
+        flow_manager = app._login_flow_manager
+        orig_print = getattr(flow_manager, "print_authorize_url", None)
+        if callable(orig_print):
+            def _print_then_open(url: str) -> None:
+                orig_print(url)
+                if open_browser:
+                    try:
+                        webbrowser.open(url)
+                    except Exception:
+                        pass
+
+            flow_manager.print_authorize_url = _print_then_open
+
+    app.login()
+
+
 def get_authorizer(
     token: Optional[str] = None,
     client_id: Optional[str] = None,
@@ -89,6 +166,7 @@ def get_authorizer(
     service_instance: Optional[str] = None,
     app_name: str = APP_NAME,
     token_path: Path = DEFAULT_TOKEN_PATH,
+    no_browser: bool = False,
 ) -> AccessTokenAuthorizer | RefreshTokenAuthorizer:
     """Get a Globus authorizer for MDF Connect.
 
@@ -104,6 +182,7 @@ def get_authorizer(
         service_instance: "prod" or "dev" - determines which MDF Connect instance to use.
         app_name: Application name for OAuth2 flow.
         token_path: Path to store cached tokens.
+        no_browser: If True, do not attempt to open a web browser automatically.
 
     Returns:
         A Globus authorizer ready for API calls.
@@ -134,7 +213,7 @@ def get_authorizer(
     if scope is None:
         scope, resource_server = get_scopes_for_service(service_instance)
     else:
-        resource_server = scope.split("/scopes/")[1].split("/")[0] if "/scopes/" in scope else scope
+        resource_server = _scope_to_resource_server(scope)
 
     # Ensure token directory exists
     token_path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,11 +235,10 @@ def get_authorizer(
     # Add the required scope
     app.add_scope_requirements({resource_server: [scope]})
 
-    # Login if needed (opens browser for user authentication)
+    # Login if needed
     if app.login_required():
-        print(f"Opening browser for Globus authentication...")
-        print(f"If browser doesn't open, visit: {REDIRECT_URI}")
-        app.login()
+        print("Visit this URL, sign in, and paste the code:")
+        _login_with_browser_fallback(app, no_browser=no_browser)
 
     return app.get_authorizer(resource_server)
 
@@ -170,6 +248,7 @@ def get_authorizer_for_scopes(
     client_id: Optional[str] = None,
     app_name: str = APP_NAME,
     token_path: Path = DEFAULT_TOKEN_PATH,
+    no_browser: bool = False,
 ) -> dict[str, AccessTokenAuthorizer | RefreshTokenAuthorizer]:
     """Get authorizers for multiple scopes (e.g., for clone + transfer).
 
@@ -178,6 +257,7 @@ def get_authorizer_for_scopes(
         client_id: Optional Globus client ID.
         app_name: Application name for OAuth2 flow.
         token_path: Path to store cached tokens.
+        no_browser: If True, do not attempt to open a web browser automatically.
 
     Returns:
         Dictionary mapping resource server IDs to authorizers.
@@ -193,27 +273,12 @@ def get_authorizer_for_scopes(
 
     app = UserApp(app_name, client_id=client_id, config=config)
 
-    # Build scope requirements
-    scope_reqs = {}
-    for scope in scopes:
-        if "/scopes/" in scope:
-            resource_server = scope.split("/scopes/")[1].split("/")[0]
-        elif ":" in scope:
-            # URN format: urn:globus:auth:scope:server:scope_name
-            parts = scope.split(":")
-            resource_server = parts[4] if len(parts) > 4 else scope
-        else:
-            resource_server = scope
-
-        if resource_server not in scope_reqs:
-            scope_reqs[resource_server] = []
-        scope_reqs[resource_server].append(scope)
-
+    scope_reqs = _build_scope_requirements(scopes)
     app.add_scope_requirements(scope_reqs)
 
     if app.login_required():
-        print("Opening browser for Globus authentication...")
-        app.login()
+        print("Visit this URL, sign in, and paste the code:")
+        _login_with_browser_fallback(app, no_browser=no_browser)
 
     # UserApp always adds openid/profile/email for auth.globus.org;
     # include that authorizer so callers can use it for identity.
@@ -246,6 +311,46 @@ def logout(token_path: Path = DEFAULT_TOKEN_PATH) -> bool:
     return False
 
 
+def login_required_for(
+    scopes: list[str] | None = None,
+    *,
+    service: str | None = None,
+    client_id: Optional[str] = None,
+    token_path: Path = DEFAULT_TOKEN_PATH,
+) -> bool:
+    """Check if login is required for a set of scopes.
+
+    Returns True if the cached token store lacks any of the given scopes.
+    Performs no interactive prompting and makes no network requests.
+
+    Args:
+        scopes: List of scope URIs to check. Defaults to the full set used by
+            BackendClient (Connect, Data, Transfer, Groups).
+        service: Service instance ("prod", "staging", "dev").
+        client_id: Optional Globus client ID.
+        token_path: Path to token storage file.
+
+    Returns:
+        True if login is required (tokens missing/insufficient), False otherwise.
+    """
+    if not token_path.exists():
+        return True
+
+    if scopes is None:
+        connect_scope, _ = get_scopes_for_service(service)
+        scopes = [connect_scope, DATA_MDF_SCOPE, TRANSFER_SCOPE, GROUPS_SCOPE]
+
+    client_id = client_id or MDF_AGENT_CLIENT_ID
+    storage = JSONTokenStorage(str(token_path))
+    config = GlobusAppConfig(token_storage=storage, request_refresh_tokens=True)
+    app = UserApp(APP_NAME, client_id=client_id, config=config)
+
+    scope_reqs = _build_scope_requirements(scopes)
+    app.add_scope_requirements(scope_reqs)
+
+    return bool(app.login_required())
+
+
 def is_logged_in(
     service_instance: Optional[str] = None,
     client_id: Optional[str] = None,
@@ -261,15 +366,8 @@ def is_logged_in(
     Returns:
         True if valid cached tokens exist.
     """
-    if not token_path.exists():
-        return False
-
-    client_id = client_id or MDF_AGENT_CLIENT_ID
-    scope, resource_server = get_scopes_for_service(service_instance)
-
-    storage = JSONTokenStorage(str(token_path))
-    config = GlobusAppConfig(token_storage=storage, request_refresh_tokens=True)
-    app = UserApp(APP_NAME, client_id=client_id, config=config)
-    app.add_scope_requirements({resource_server: [scope]})
-
-    return not app.login_required()
+    return not login_required_for(
+        service=service_instance,
+        client_id=client_id,
+        token_path=token_path,
+    )

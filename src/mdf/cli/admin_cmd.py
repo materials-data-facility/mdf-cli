@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from typing import Optional
 
 import typer
@@ -14,13 +13,16 @@ from mdf.core.config import resolve_service
 from mdf.cli import theme
 from mdf.cli.formatting import (
     api_spinner,
+    confirm_or_abort,
     console,
+    emit_json_result,
+    exit_code_for,
     format_status_badge,
     handle_api_result,
     is_success,
     require_success,
+    resolve_identifier_with_notice,
 )
-from mdf.cli.preflight import resolve_dataset_identifier
 
 app = typer.Typer(
     help="Curation and admin commands",
@@ -28,13 +30,11 @@ app = typer.Typer(
 )
 
 
-def _resolve_identifier_with_notice(client: BackendClient, raw_id: str) -> str:
-    resolved_id = resolve_dataset_identifier(raw_id, client)
-    if resolved_id != raw_id:
-        console.print(
-            f"[secondary]Resolved DOI to source ID:[/secondary] {theme.ident(resolved_id)}"
-        )
-    return resolved_id
+def _resolve_identifier_with_notice(
+    client: BackendClient, raw_id: str, *, json_mode: bool = False
+) -> str:
+    """Thin alias for the shared resolver — see ``formatting.resolve_identifier_with_notice``."""
+    return resolve_identifier_with_notice(client, raw_id, json_mode=json_mode)
 
 
 @app.command()
@@ -65,15 +65,15 @@ def pending(
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
+        emit_json_result(result)
         return
 
     submissions = result.get("submissions", [])
     if not submissions and not is_success(result):
-        # Distinguish "the queue is empty" from "we could not read the queue".
-        # (Exit code stays 0, as it always has for this command.)
+        # Distinguish "the queue is empty" from "we could not read the queue" —
+        # the latter is a failure and must not exit 0.
         handle_api_result(result, error_prefix="Pending failed")
-        return
+        raise typer.Exit(code=exit_code_for(result))
     if not submissions:
         console.print()
         console.print(theme.empty_panel(
@@ -124,16 +124,18 @@ def approve(
         mdf admin approve my_dataset_v1 --notes "LGTM" --no-mint-doi
     """
     resolved = resolve_service(service)
-    if not yes and sys.stdin.isatty():
-        if not typer.confirm(f"Approve {source_id}? This will start publication.", default=False):
-            raise typer.Exit(code=1)
+    confirm_or_abort(
+        f"Approve {source_id}? This will start publication.",
+        yes=yes,
+        json_mode=json_output,
+    )
     client = BackendClient.authenticated(
         base_url=api_url,
         token=token,
         service_instance=resolved,
         dev_user_id=dev_user,
     )
-    source_id = _resolve_identifier_with_notice(client, source_id)
+    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
     with api_spinner("Approving..."):
         result = client.curation_approve(
             source_id=source_id,
@@ -144,9 +146,7 @@ def approve(
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not is_success(result):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if is_success(result):
@@ -182,16 +182,18 @@ def reject(
         mdf admin reject my_dataset_v1 --reason "Missing methods section"
     """
     resolved = resolve_service(service)
-    if not yes and sys.stdin.isatty():
-        if not typer.confirm(f"Reject {source_id}? This will return the submission to the author.", default=False):
-            raise typer.Exit(code=1)
+    confirm_or_abort(
+        f"Reject {source_id}? This will return the submission to the author.",
+        yes=yes,
+        json_mode=json_output,
+    )
     client = BackendClient.authenticated(
         base_url=api_url,
         token=token,
         service_instance=resolved,
         dev_user_id=dev_user,
     )
-    source_id = _resolve_identifier_with_notice(client, source_id)
+    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
     with api_spinner("Rejecting..."):
         result = client.curation_reject(
             source_id=source_id,
@@ -202,9 +204,7 @@ def reject(
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not is_success(result):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if is_success(result):
@@ -239,24 +239,24 @@ def delete_dataset(
         mdf admin delete my_dataset_v1 --reason "spam"
     """
     resolved = resolve_service(service)
-    if not yes and sys.stdin.isatty():
-        if not typer.confirm(f"Delete {source_id}? This will soft-delete the submission.", default=False):
-            raise typer.Exit(code=1)
+    confirm_or_abort(
+        f"Delete {source_id}? This will soft-delete the submission.",
+        yes=yes,
+        json_mode=json_output,
+    )
     client = BackendClient.authenticated(
         base_url=api_url,
         token=token,
         service_instance=resolved,
         dev_user_id=dev_user,
     )
-    source_id = _resolve_identifier_with_notice(client, source_id)
+    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
     with api_spinner("Deleting..."):
         result = client.delete_submission(source_id, reason=reason, version=version)
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not is_success(result):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if is_success(result):
@@ -299,9 +299,7 @@ def stats(
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not is_success(result):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if not is_success(result):
@@ -359,9 +357,7 @@ def embedding_status(
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not is_success(result):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if not is_success(result):
@@ -431,12 +427,10 @@ def rebuild_embeddings(
         mdf admin rebuild-embeddings --force --limit 500
         mdf admin rebuild-embeddings --no-snapshot   # fill embeddings, skip S3 publish
     """
-    if not yes and sys.stdin.isatty():
-        msg = "Rebuild embeddings for all published datasets lacking them?"
-        if force:
-            msg = "Re-embed ALL published datasets (--force)? This calls OpenAI for each."
-        if not typer.confirm(msg, default=False):
-            raise typer.Exit(code=1)
+    msg = "Rebuild embeddings for all published datasets lacking them?"
+    if force:
+        msg = "Re-embed ALL published datasets (--force)? This calls OpenAI for each."
+    confirm_or_abort(msg, yes=yes, json_mode=json_output)
 
     resolved = resolve_service(service)
     client = BackendClient.authenticated(
@@ -452,9 +446,7 @@ def rebuild_embeddings(
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not is_success(result):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if not is_success(result):

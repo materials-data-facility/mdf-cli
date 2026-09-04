@@ -235,24 +235,24 @@ def test_preview_404_json_exits_zero(monkeypatch):
 
 def test_preview_404_dataset_not_found_still_errors(monkeypatch):
     """A 404 for a nonexistent dataset (typo'd id) must NOT be treated as
-    profile-missing: it keeps normal error handling and exits 1."""
+    profile-missing: it keeps normal error handling and exits 3 (not found)."""
     _patch_preview(monkeypatch, ApiResult({"detail": "Dataset not found"}, status_code=404))
     result = runner.invoke(app, ["dataset", "preview", "no-such-dataset"])
-    assert result.exit_code == 1
+    assert result.exit_code == 3
     assert "No file profile exists" not in result.stdout
 
 
-def test_preview_404_dataset_not_found_json_exits_one(monkeypatch):
+def test_preview_404_dataset_not_found_json_exits_not_found(monkeypatch):
     _patch_preview(monkeypatch, ApiResult({"detail": "Dataset not found"}, status_code=404))
     result = runner.invoke(app, ["dataset", "preview", "no-such-dataset", "--json"])
-    assert result.exit_code == 1
+    assert result.exit_code == 3
     assert json.loads(result.stdout)["detail"] == "Dataset not found"
 
 
 def test_preview_500_still_errors(monkeypatch):
     _patch_preview(monkeypatch, ApiResult({"detail": "boom"}, status_code=500))
     result = runner.invoke(app, ["dataset", "preview", "migrated_v1"])
-    assert result.exit_code == 1
+    assert result.exit_code == 5
     assert "Preview failed" in result.stdout
 
 

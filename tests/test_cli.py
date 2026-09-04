@@ -560,11 +560,17 @@ class TestSetupAndManifestUX:
 
 class TestListAndStreamRegressions:
     def test_list_json_applies_filters_and_limit(self, monkeypatch):
+        seen = {}
+
         class FakeClient:
-            def submissions(self):
+            def submissions(self, organization=None, **kwargs):
+                # `mdf list` now filters and pages server-side (F-3): record
+                # what it asked for, then answer as a single exhausted page.
+                seen.update(kwargs)
                 return {
                     "success": True,
                     "total": 4,
+                    "next_key": None,
                     "submissions": [
                         {
                             "source_id": "keep-first",
@@ -625,10 +631,16 @@ class TestListAndStreamRegressions:
 
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
-        assert payload["total"] == 1
+        # `total` stays the backend's overall count; `count` is what came back.
+        assert payload["total"] == 4
+        assert payload["count"] == 1
         assert [record["source_id"] for record in payload["submissions"]] == [
             "keep-first"
         ]
+        # --status is now handed to the backend rather than only filtered locally.
+        assert seen["status"] == "published"
+        assert seen["limit"] == 50  # --search needs full pages to filter over
+        assert seen["start_key"] is None
 
     def test_stream_disabled_warning_exits_nonzero(self):
         result = runner.invoke(

@@ -28,11 +28,12 @@ from pathlib import Path, PurePosixPath
 import re
 import threading
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 from mdf.core.manifest import load_manifest, save_manifest, init_manifest
 from mdf.core.submission import build_submission
 from mdf.core.validation import validate_manifest
-from mdf.core.backend_client import BackendClient
+from mdf.core.backend_client import BackendClient, _api_url_for_service
 from mdf.extractors.registry import discover_metadata
 from mdf.models.config import Author, ManifestConfig
 
@@ -42,6 +43,70 @@ _NCSA_MDF_COLLECTION_UUID = "82f1b5c6-6e9b-11e5-ba47-22000b92c6ec"
 
 
 _UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
+
+#: Schemes a submission may reference for data that MDF does not have to upload.
+_SUPPORTED_REMOTE_SCHEMES = ("globus://", "https://", "stream://")
+
+#: Any ``scheme://`` prefix — used to tell a remote URL from a local path.
+_REMOTE_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+
+#: Raised (as ``RuntimeError``) when local files must be uploaded but no data
+#: token is available. Distinct from the unsupported-scheme message so callers
+#: and users can tell "log in" apart from "fix your manifest".
+_NO_DATA_TOKEN_MESSAGE = (
+    "Local files require a Globus data token; run `mdf login` or pass "
+    "Globus/HTTPS URLs as data_sources"
+)
+
+
+def _split_data_sources(data_sources: List[str]) -> Tuple[List[str], List[str]]:
+    """Split ``data_sources`` into (local paths, unsupported-scheme URLs).
+
+    Supported remote schemes pass through silently. Anything with a scheme we
+    do not support (notably ``http://``) is reported rather than treated as a
+    local path — resolving it as a path mangles the URL and produces a
+    misleading "no data token" error.
+    """
+    local: List[str] = []
+    unsupported: List[str] = []
+    for source in data_sources:
+        if source.startswith(_SUPPORTED_REMOTE_SCHEMES):
+            continue
+        if _REMOTE_SCHEME_RE.match(source):
+            unsupported.append(source)
+        else:
+            local.append(source)
+    return local, unsupported
+
+
+def _unsupported_source_errors(unsupported: List[str]) -> List[str]:
+    """Per-source error strings for data sources we refuse to download."""
+    return [
+        f"{source}: unsupported scheme — only https:// data sources can be "
+        "downloaded directly (use --transfer for Globus-only datasets)"
+        for source in unsupported
+    ]
+
+
+def _no_downloadable_files_error(unsupported: Optional[List[str]] = None) -> str:
+    message = (
+        "No HTTPS-downloadable files found. Try --transfer for cross-endpoint downloads."
+    )
+    if unsupported:
+        message = (
+            "Unsupported data source scheme(s) — only https:// can be downloaded "
+            "directly: " + ", ".join(unsupported) + ". " + message
+        )
+    return message
+
+
+def _unsupported_scheme_message(sources: List[str]) -> str:
+    return (
+        "Unsupported data source scheme(s): "
+        + ", ".join(sources)
+        + ". Supported schemes are globus:// and https:// (plain http:// is not "
+        "accepted — use https://), or local filesystem paths."
+    )
 
 # Matches bare DOIs (10.xxx/...), doi: prefixed, and https://doi.org/ URLs
 _DOI_RE = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:)?(10\.\d{4,}/\S+)", re.IGNORECASE)
@@ -91,6 +156,21 @@ class UploadResult(NamedTuple):
     data_sources: List[str]
     archive_url: Optional[str]
     archive_size: Optional[int]
+
+
+class ResolvedFiles(NamedTuple):
+    files: List[tuple]
+    https_sources: List[str]
+    #: Sources whose scheme cannot be downloaded directly (e.g. ``http://``).
+    unsupported: List[str] = []
+
+
+def _make_anonymous_client(
+    api_url: Optional[str] = None,
+    service_instance: Optional[str] = None,
+) -> BackendClient:
+    url = api_url or _api_url_for_service(service_instance)
+    return BackendClient(base_url=url)
 
 
 def _resolve_upload_tls_verify() -> bool | str:
@@ -428,23 +508,92 @@ def _globus_uri_to_https(uri: str) -> Optional[str]:
     return f"{_MDF_HTTPS_BASE}{path}"
 
 
+def _is_mdf_https_url(url: str) -> bool:
+    """True iff ``url`` is an ``https://`` URL served by the MDF HTTPS collection.
+
+    Security boundary: the caller's Globus *data* token may only ever be sent to
+    the MDF HTTPS base (``_MDF_HTTPS_BASE``). A dataset's ``data_sources`` are
+    publisher-controlled, so attaching the token to an arbitrary host would let
+    any publisher harvest cloners' tokens. Anything else — a different host, a
+    plain ``http://`` URL, a malformed URL — gets no credentials.
+    """
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme != "https":
+        return False
+    base_host = (urlparse(_MDF_HTTPS_BASE).hostname or "").lower()
+    return (parsed.hostname or "").lower() == base_host
+
+
+def _https_dest_for_url(url: str, out: Path) -> Path:
+    """Derive a collision-free destination path for a bare HTTPS data source.
+
+    Flattening to the URL basename silently overwrites files when two sources
+    share a filename, so mirror the URL structure instead: ``<host>/<path...>``
+    with every segment sanitized and ``.``/``..`` dropped. The result is always
+    inside ``out``.
+    """
+    parsed = urlparse(url)
+    host = re.sub(r"[^A-Za-z0-9._-]", "_", (parsed.hostname or "download").lower()) or "download"
+    segments: List[str] = []
+    for raw_segment in unquote(parsed.path or "").split("/"):
+        segment = raw_segment.strip()
+        if not segment or segment in (".", ".."):
+            continue
+        segment = re.sub(r"[^A-Za-z0-9._-]", "_", segment)
+        segment = segment.lstrip(".") or "_"
+        segments.append(segment)
+    if not segments:
+        segments = ["download"]
+
+    dest = out.joinpath(host, *segments)
+    # Belt and braces: never escape the output directory.
+    out_resolved = out.resolve()
+    dest_resolved = dest.resolve()
+    if out_resolved not in dest_resolved.parents and dest_resolved != out_resolved:
+        raise RuntimeError(f"Refusing to write '{url}' outside the output directory")
+    return dest
+
+
 def _resolve_globus_files(
     data_sources: List[str],
     transfer_token: str,
-) -> List[tuple]:
+) -> ResolvedFiles:
     """Resolve globus:// URIs to (https_url, relative_path) pairs for HTTPS download.
 
     For per-file NCSA URIs: convert directly.
     For directory NCSA URIs (ending with /): use operation_ls to list contents recursively.
     Non-NCSA globus:// URIs are skipped with a warning.
-    Non-globus sources (https://, stream://) are skipped.
+    ``https://`` sources are returned as a separate list (``https_sources``).
+    ``http://`` (and any other non-``https`` remote scheme) is REJECTED and
+    returned in ``unsupported`` — cleartext transport would leak the download
+    and cannot carry credentials safely.
+    Non-globus sources (stream://) are skipped.
     """
     import globus_sdk
 
     results: List[tuple] = []
+    https_sources: List[str] = []
+    unsupported: List[str] = []
 
     for source in data_sources:
+        if source.startswith("https://"):
+            https_sources.append(source)
+            continue
+
+        if source.startswith("http://"):
+            unsupported.append(source)
+            continue
+
         if not source.startswith("globus://"):
+            if source.startswith("stream://"):
+                continue
+            if _REMOTE_SCHEME_RE.match(source):
+                unsupported.append(source)
             continue
 
         rest = source[len("globus://"):]
@@ -479,7 +628,7 @@ def _resolve_globus_files(
                 rel = parts[-1] if parts else path.lstrip("/")
             results.append((https_url, rel))
 
-    return results
+    return ResolvedFiles(files=results, https_sources=https_sources, unsupported=unsupported)
 
 
 def _ls_recursive(
@@ -518,7 +667,14 @@ def _download_https_file(
 ) -> Path:
     """Download a file via streaming HTTPS GET.
 
-    Creates parent directories as needed. Retries on 502/503/504.
+    Creates parent directories as needed. Retries on 502/503/504. Follows
+    redirects (Zenodo & friends answer 302 with an S3 URL).
+
+    The bearer ``token`` is attached ONLY when ``url`` is under the MDF HTTPS
+    base — dataset ``data_sources`` are publisher-controlled, so sending the
+    caller's Globus data token to an arbitrary host would hand it to the
+    publisher. httpx also strips ``Authorization`` when a redirect crosses to a
+    different host, so a 302 off the MDF base cannot leak it either.
     """
     import time
     import httpx
@@ -527,13 +683,23 @@ def _download_https_file(
     ssl_verify = _resolve_upload_tls_verify()
     timeout = httpx.Timeout(connect=30, read=300, write=300, pool=30)
 
+    if url and not url.lower().startswith("https://"):
+        raise RuntimeError(
+            f"Refusing to download {url}: only https:// URLs are supported"
+        )
+
+    headers = (
+        {"Authorization": f"Bearer {token}"} if token and _is_mdf_https_url(url) else {}
+    )
     for attempt in range(_UPLOAD_MAX_RETRIES + 1):
         try:
-            with httpx.Client(timeout=timeout, verify=ssl_verify) as client:
+            with httpx.Client(
+                timeout=timeout, verify=ssl_verify, follow_redirects=True
+            ) as client:
                 with client.stream(
                     "GET",
                     url,
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers=headers,
                 ) as resp:
                     if resp.status_code in _UPLOAD_RETRY_STATUSES and attempt < _UPLOAD_MAX_RETRIES:
                         time.sleep(2 ** attempt)
@@ -731,7 +897,13 @@ class MDFAgent:
             # Upload local files to MDF storage via HTTPS and replace
             # paths with globus:// URIs before submitting.
             data_sources = payload.get("data_sources", [])
-            if data_sources and client._globus_data_token:
+            local_sources, unsupported_sources = _split_data_sources(data_sources)
+            if unsupported_sources:
+                raise RuntimeError(_unsupported_scheme_message(unsupported_sources))
+            if local_sources and not client._globus_data_token:
+                raise RuntimeError(_NO_DATA_TOKEN_MESSAGE)
+
+            if local_sources and client._globus_data_token:
                 # Use source_id for deterministic upload paths when available
                 ext = payload.get("extensions", {})
                 upload_source_id = ext.get("mdf_source_id") or ext.get("mdf_source_name")
@@ -750,6 +922,21 @@ class MDFAgent:
                     payload["download_url"] = upload_result.archive_url
                 if upload_result.archive_size:
                     payload["archive_size"] = upload_result.archive_size
+
+            remaining_local, remaining_unsupported = _split_data_sources(
+                payload.get("data_sources", [])
+            )
+            if remaining_unsupported:
+                raise RuntimeError(_unsupported_scheme_message(remaining_unsupported))
+            if remaining_local and not client._globus_data_token:
+                raise RuntimeError(_NO_DATA_TOKEN_MESSAGE)
+            if remaining_local:
+                raise RuntimeError(
+                    "Upload did not replace all local paths with Globus URIs: "
+                    + ", ".join(remaining_local)
+                    + ". Re-run `mdf publish --submit`; never submit local filesystem paths."
+                )
+
             return client.submit(payload)
         finally:
             client.close()
@@ -1027,6 +1214,13 @@ class MDFAgent:
         client.close()
         return result
 
+    @staticmethod
+    def _make_anonymous_client(
+        api_url: Optional[str] = None,
+        service_instance: Optional[str] = None,
+    ) -> BackendClient:
+        return _make_anonymous_client(api_url=api_url, service_instance=service_instance)
+
     def clone(
         self,
         source_id: str,
@@ -1059,14 +1253,17 @@ class MDFAgent:
         Returns:
             Dict with success, method used, file count, output path, etc.
         """
-        client = BackendClient.authenticated(
-            base_url=api_url,
-            token=token,
-            service_instance=service_instance,
-            dev_user_id=dev_user_id,
+        client: Optional[BackendClient] = None
+        plan: Optional[Dict[str, Any]] = None
+
+        client, plan, used_anonymous = self._client_for_clone(
+            source_id, output_dir, version, method,
+            api_url=api_url, token=token, service_instance=service_instance, dev_user_id=dev_user_id,
         )
-        try:
+        if plan is None:
             plan = self._prepare_clone(client, source_id, output_dir, version, method)
+
+        try:
             if not plan.get("success"):
                 return plan
 
@@ -1089,8 +1286,9 @@ class MDFAgent:
 
             if selected_method == "zip":
                 download_url = plan.get("download_url", "") or ""
-                if not download_url.lower().startswith(("http://", "https://")):
-                    # The archive URL is not HTTPS-fetchable (e.g. a globus:// URI).
+                if not download_url.lower().startswith("https://"):
+                    # The archive URL is not HTTPS-fetchable (e.g. a globus:// URI
+                    # or a cleartext http:// URL, which we refuse).
                     # Don't hand it to httpx (which raises UnsupportedProtocol) —
                     # fall back to the file-by-file HTTPS path below.
                     print(
@@ -1124,30 +1322,220 @@ class MDFAgent:
                             stage_callback("falling_back_to_https", plan)
 
             files = plan.get("files")
-            if not files:
+            https_sources = plan.get("https_sources")
+            unsupported = plan.get("unsupported") or []
+            if files is None and https_sources is None:
+                resolved = _resolve_globus_files(plan.get("data_sources", []), plan.get("transfer_token", ""))
+                files = resolved.files
+                https_sources = resolved.https_sources
+                unsupported = list(resolved.unsupported)
+
+            if not files and not https_sources:
                 return {
                     "success": False,
-                    "error": "No HTTPS-downloadable files found. Try --transfer for cross-endpoint downloads.",
+                    "error": _no_downloadable_files_error(unsupported),
                 }
 
+            total_files = len(files or []) + len(https_sources or [])
             if stage_callback:
-                plan["file_count"] = len(files)
+                plan["file_count"] = total_files
                 stage_callback("downloading_files", plan)
-            result = self._clone_via_https(
-                files,
-                plan["data_token"],
-                plan["out"],
-                plan["card"],
-                workers=workers,
-                progress_callback=progress_callback,
-                on_files_resolved=on_files_resolved,
-                on_file_done=on_file_done,
-                stage_callback=stage_callback,
-            )
+            if on_files_resolved:
+                on_files_resolved(total_files)
+
+            result = None
+            if files:
+                result = self._clone_via_https(
+                    files,
+                    plan["data_token"],
+                    plan["out"],
+                    plan["card"],
+                    workers=workers,
+                    progress_callback=progress_callback,
+                    on_files_resolved=None,
+                    on_file_done=on_file_done,
+                    stage_callback=None,
+                )
+
+            if https_sources or unsupported:
+                https_downloaded, https_errors = self._download_https_sources(
+                    https_sources or [],
+                    plan["out"],
+                    plan.get("data_token") or "",
+                    progress_callback=progress_callback,
+                    on_file_done=on_file_done,
+                )
+                https_errors.extend(_unsupported_source_errors(unsupported))
+                result = self._merge_https_result(result, https_downloaded, https_errors, plan)
+
+            # If an anonymous download failed with a 401 or 403, escalate to authenticated
+            if used_anonymous and result and not result.get("success"):
+                errors = result.get("errors") or [result.get("error", "")]
+                if any("401" in str(e) or "403" in str(e) for e in errors):
+                    client.close()
+                    client = BackendClient.authenticated(
+                        base_url=api_url,
+                        token=token,
+                        service_instance=service_instance,
+                        dev_user_id=dev_user_id,
+                    )
+                    auth_plan = self._prepare_clone(client, source_id, output_dir, version, method)
+                    if auth_plan.get("success"):
+                        auth_files = auth_plan.get("files") or []
+                        auth_https = auth_plan.get("https_sources") or []
+                        auth_unsupported = auth_plan.get("unsupported") or []
+                        auth_result = None
+                        if auth_files:
+                            auth_result = self._clone_via_https(
+                                auth_files,
+                                auth_plan["data_token"],
+                                auth_plan["out"],
+                                auth_plan["card"],
+                                workers=workers,
+                                progress_callback=progress_callback,
+                                on_files_resolved=None,
+                                on_file_done=on_file_done,
+                                stage_callback=None,
+                            )
+                        if auth_https or auth_unsupported:
+                            auth_downloaded, auth_errors = self._download_https_sources(
+                                auth_https,
+                                auth_plan["out"],
+                                auth_plan.get("data_token") or "",
+                                progress_callback=progress_callback,
+                                on_file_done=on_file_done,
+                            )
+                            auth_errors.extend(_unsupported_source_errors(auth_unsupported))
+                            auth_result = self._merge_https_result(
+                                auth_result, auth_downloaded, auth_errors, auth_plan
+                            )
+                        # The authenticated retry supersedes the failed anonymous
+                        # attempt unconditionally — keeping the anonymous `result`
+                        # here (the old `if result is None` guard) reported the 403
+                        # even when the retry succeeded.
+                        if auth_result is not None:
+                            result = auth_result
+
             result["resolved_source_id"] = plan["resolved_source_id"]
             return result
         finally:
             client.close()
+
+    def _download_https_sources(
+        self,
+        https_sources: List[str],
+        out: Path,
+        data_token: str,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        on_file_done: Optional[Callable[[str, int], None]] = None,
+    ) -> Tuple[int, List[str]]:
+        """Download bare ``https://`` data sources into ``out``.
+
+        Destinations mirror the URL (``<host>/<path...>``) instead of being
+        flattened to the basename, so two sources that share a filename no
+        longer overwrite each other; an existing destination is never
+        overwritten. Returns ``(downloaded_count, errors)``.
+        """
+        downloaded = 0
+        errors: List[str] = []
+
+        for url in https_sources:
+            label = PurePosixPath(unquote(urlparse(url).path)).name or "download"
+            try:
+                dest = _https_dest_for_url(url, out)
+                if dest.exists():
+                    raise RuntimeError(
+                        f"destination already exists: {dest} — refusing to overwrite"
+                    )
+                dest.parent.mkdir(parents=True, exist_ok=True)
+
+                def _cb(name: str, sent: int, total: int, _label: str = label) -> None:
+                    if progress_callback:
+                        progress_callback(_label, sent, total)
+
+                _download_https_file(url, dest, data_token, progress_callback=_cb)
+                size = dest.stat().st_size if dest.exists() else 0
+                if on_file_done:
+                    on_file_done(label, size)
+                downloaded += 1
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+
+        return downloaded, errors
+
+    def _merge_https_result(
+        self,
+        result: Optional[Dict[str, Any]],
+        downloaded: int,
+        errors: List[str],
+        plan: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Fold bare-HTTPS download counts/errors into a clone result."""
+        if result is None:
+            return {
+                "success": not errors,
+                "method": "https",
+                "partial": bool(errors) and downloaded > 0,
+                "files_count": downloaded,
+                "failed_count": len(errors),
+                "errors": errors or None,
+                "path": str(plan["out"]),
+                "source_id": plan["card"].get("source_id"),
+                "title": plan["card"].get("title"),
+            }
+
+        result["files_count"] = (result.get("files_count") or 0) + downloaded
+        result["failed_count"] = (result.get("failed_count") or 0) + len(errors)
+        if errors:
+            result["errors"] = (result.get("errors") or []) + errors
+            result["success"] = False
+            result["partial"] = (result.get("files_count") or 0) > 0
+        return result
+
+    def _client_for_clone(
+        self,
+        source_id: str,
+        output_dir: Optional[str],
+        version: Optional[str],
+        method: str,
+        *,
+        api_url: Optional[str],
+        token: Optional[str],
+        service_instance: Optional[str],
+        dev_user_id: Optional[str],
+    ):
+        """Pick the client for a clone: anonymous first for public datasets.
+
+        Public datasets need no login, so when the caller supplied no explicit
+        credentials and did not ask for a Globus transfer, try an anonymous
+        client and keep it if the plan succeeds. Escalate to an authenticated
+        client on 401/403, when the plan selects ``transfer``, or on any error.
+
+        Returns ``(client, plan_or_None, used_anonymous)``. ``plan`` is the
+        anonymous plan when it was accepted, so callers do not re-plan.
+
+        Only a *successful* anonymous plan is kept. A restricted dataset answers
+        anonymously with 401/403/404 (or "not found"); accepting that failed
+        plan short-circuited the authenticated retry and the caller saw a
+        spurious "not found" instead of their own private dataset.
+        """
+        if token is None and dev_user_id is None and method != "transfer":
+            anon_client = self._make_anonymous_client(api_url=api_url, service_instance=service_instance)
+            try:
+                candidate = self._prepare_clone(anon_client, source_id, output_dir, version, method)
+                if candidate.get("success") and candidate.get("selected_method") != "transfer":
+                    return anon_client, candidate, True
+            except Exception:
+                pass
+            anon_client.close()
+
+        client = BackendClient.authenticated(
+            base_url=api_url,
+            token=token,
+            service_instance=service_instance,
+            dev_user_id=dev_user_id,
+        )
+        return client, None, False
 
     def plan_clone(
         self,
@@ -1161,14 +1549,16 @@ class MDFAgent:
         dev_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Inspect how clone will behave without downloading data."""
-        client = BackendClient.authenticated(
-            base_url=api_url,
-            token=token,
-            service_instance=service_instance,
-            dev_user_id=dev_user_id,
+        client: Optional[BackendClient] = None
+        plan: Optional[Dict[str, Any]] = None
+
+        client, plan, used_anonymous = self._client_for_clone(
+            source_id, output_dir, version, method,
+            api_url=api_url, token=token, service_instance=service_instance, dev_user_id=dev_user_id,
         )
         try:
-            plan = self._prepare_clone(client, source_id, output_dir, version, method)
+            if plan is None:
+                plan = self._prepare_clone(client, source_id, output_dir, version, method)
         finally:
             client.close()
 
@@ -1205,7 +1595,24 @@ class MDFAgent:
             if resolved_id:
                 source_id = resolved_id
 
-        card_resp = client.get_card(source_id, version=version)
+        try:
+            card_resp = client.get_card(source_id, version=version)
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status in (401, 403):
+                return {"success": False, "status_code": status, "error": str(exc)}
+            raise
+
+        status_code = getattr(card_resp, "status_code", None)
+        if status_code is None and isinstance(card_resp, dict):
+            status_code = card_resp.get("status_code")
+        if status_code in (401, 403):
+            return {
+                "success": False,
+                "status_code": status_code,
+                "error": card_resp.get("detail") or card_resp.get("error") or f"HTTP {status_code}",
+            }
+
         card = card_resp.get("card", card_resp)
         if not card.get("source_id"):
             return {"success": False, "error": f"Dataset '{source_id}' not found"}
@@ -1238,17 +1645,22 @@ class MDFAgent:
             selected_method = "https"
 
         files = None
+        https_sources = None
+        unsupported: List[str] = []
         file_count = None
         if selected_method == "https":
             if not data_sources:
                 return {"success": False, "error": "No data sources found for this dataset"}
-            files = _resolve_globus_files(data_sources, transfer_token)
-            if not files:
+            resolved = _resolve_globus_files(data_sources, transfer_token)
+            files = resolved.files
+            https_sources = resolved.https_sources
+            unsupported = list(resolved.unsupported)
+            if not files and not https_sources:
                 return {
                     "success": False,
-                    "error": "No HTTPS-downloadable files found. Try --transfer for cross-endpoint downloads.",
+                    "error": _no_downloadable_files_error(unsupported),
                 }
-            file_count = len(files)
+            file_count = len(files) + len(https_sources)
 
         return {
             "success": True,
@@ -1268,6 +1680,8 @@ class MDFAgent:
             "transfer_token": transfer_token,
             "card": card,
             "files": files,
+            "https_sources": https_sources,
+            "unsupported": unsupported,
             "file_count": file_count,
         }
 
@@ -1402,44 +1816,68 @@ class MDFAgent:
         authorizer = globus_sdk.AccessTokenAuthorizer(transfer_token)
         tc = globus_sdk.TransferClient(authorizer=authorizer)
 
+        task_ids: List[str] = []
+        errors: List[str] = []
+        globus_count = 0
+
         # Group sources by endpoint
         for source in data_sources:
             if not source.startswith("globus://"):
                 continue
+            globus_count += 1
 
             rest = source[len("globus://"):]
             slash_idx = rest.find("/")
             if slash_idx < 0:
+                errors.append(f"{source}: Invalid globus URI format")
                 continue
             src_endpoint = rest[:slash_idx]
             src_path = rest[slash_idx:]
 
-            td = globus_sdk.TransferData(
-                tc,
-                source_endpoint=src_endpoint,
-                destination_endpoint=local_ep,
-                label=f"MDF clone: {card.get('source_id', '')}",
-            )
-            is_dir = src_path.endswith("/")
-            td.add_item(src_path, str(out) + "/", recursive=is_dir)
+            try:
+                td = globus_sdk.TransferData(
+                    tc,
+                    source_endpoint=src_endpoint,
+                    destination_endpoint=local_ep,
+                    label=f"MDF clone: {card.get('source_id', '')}",
+                )
+                is_dir = src_path.endswith("/")
+                td.add_item(src_path, str(out) + "/", recursive=is_dir)
 
-            result = tc.submit_transfer(td)
-            task_id = result.get("task_id", "")
-            if stage_callback:
-                stage_callback("transfer_queued", {"task_id": task_id, "path": str(out)})
+                result = tc.submit_transfer(td)
+                task_id = result.get("task_id", "")
+                if task_id:
+                    task_ids.append(task_id)
+                if stage_callback:
+                    stage_callback("transfer_queued", {"task_id": task_id, "path": str(out)})
+            except Exception as exc:
+                errors.append(f"{source}: {exc}")
 
+        if globus_count == 0:
+            return {"success": False, "error": "No globus:// sources found for transfer"}
+
+        if not task_ids:
             return {
-                "success": True,
-                "method": "transfer",
-                "partial": False,
-                "task_id": task_id,
-                "monitor_url": f"https://app.globus.org/activity/{task_id}",
-                "path": str(out),
-                "source_id": card.get("source_id"),
-                "title": card.get("title"),
+                "success": False,
+                "error": f"Transfer failed for all sources: {'; '.join(errors)}" if errors else "Transfer failed",
             }
 
-        return {"success": False, "error": "No globus:// sources found for transfer"}
+        first_task_id = task_ids[0]
+        # A partial transfer is NOT a success: some sources never got queued, so
+        # the caller must see the failures (and a non-zero exit) rather than a
+        # bare "Transfer queued!".
+        return {
+            "success": not errors,
+            "method": "transfer",
+            "partial": bool(errors),
+            "task_id": first_task_id,
+            "task_ids": task_ids,
+            "monitor_url": f"https://app.globus.org/activity/{first_task_id}",
+            "path": str(out),
+            "source_id": card.get("source_id"),
+            "title": card.get("title"),
+            "errors": errors if errors else None,
+        }
 
     def import_external(
         self,

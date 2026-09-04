@@ -11,6 +11,7 @@ The submission payload uses the flat v2 metadata format.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse, parse_qs, unquote
@@ -18,6 +19,15 @@ from urllib.parse import urlparse, parse_qs, unquote
 from mdf.auth.globus import NCSA_MDF_COLLECTION_UUID
 from mdf.models.config import DataSource, ManifestConfig
 from mdf.models.submission import Submission
+
+
+#: Remote schemes a submission may reference. Everything else with a scheme is
+#: an unsupported remote source (see ``unsupported_data_sources``); everything
+#: without one is a local filesystem path.
+SUPPORTED_DATA_SOURCE_SCHEMES = ("globus://", "https://", "stream://")
+
+#: Any ``scheme://`` prefix — tells a URL apart from a local path.
+REMOTE_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
 
 
 def _expand_data_source(
@@ -93,11 +103,29 @@ def resolve_data_sources(
         if isinstance(source, DataSource):
             resolved.extend(_expand_data_source(source, root))
             continue
-        if source.startswith(("globus://", "https://", "stream://")):
+        if source.startswith(SUPPORTED_DATA_SOURCE_SCHEMES):
             resolved.append(normalize_data_source(source))
+        elif REMOTE_SCHEME_RE.match(source):
+            # Unsupported remote scheme (notably http://). Pass it through
+            # VERBATIM: resolving it as a filesystem path mangles the URL into
+            # something like /cwd/http:/host/x.csv, which then gets misreported
+            # as "local files but no data token". `MDFAgent.publish` rejects
+            # these with an explicit unsupported-scheme RuntimeError.
+            resolved.append(source)
         else:
             resolved.append(str((root / source).resolve()))
     return resolved
+
+
+def unsupported_data_sources(data_sources: Iterable[str]) -> List[str]:
+    """Return the data sources whose scheme MDF cannot accept (e.g. ``http://``)."""
+    return [
+        source
+        for source in data_sources
+        if isinstance(source, str)
+        and not source.startswith(SUPPORTED_DATA_SOURCE_SCHEMES)
+        and REMOTE_SCHEME_RE.match(source)
+    ]
 
 
 def build_submission(
@@ -166,12 +194,17 @@ def build_submission(
         geo_locations=metadata.get("geo_locations"),
         data_type=metadata.get("data_type"),
         formats=metadata.get("formats"),
+        # `manifest.dataset_doi` is deliberately NOT a fallback here: it is the
+        # dataset's own DOI, not mirror-of-another-repo provenance. See
+        # ManifestConfig.to_metadata_payload, which gates it on an explicitly
+        # declared external source.
         external_doi=metadata.get("external_doi") or (metadata.get("external", {}) or {}).get("doi"),
         external_url=metadata.get("external_url") or (metadata.get("external", {}) or {}).get("url"),
         external_source=metadata.get("external_source") or (metadata.get("external", {}) or {}).get("source"),
         extensions=metadata.get("extensions"),
         ml=metadata.get("ml"),
         # Legacy fields that still need to be passed through
+        dc=manifest.dc or metadata.get("dc"),
         mrr=manifest.mrr,
         data_destinations=manifest.data_destinations,
         external_uri=manifest.external_uri,

@@ -13,15 +13,21 @@ from mdf.core.backend_client import BackendClient
 from mdf.core.config import resolve_service
 from mdf.cli import theme
 from mdf.cli.formatting import (
+    EXIT_USAGE,
     api_spinner,
+    confirm_or_abort,
     console,
+    emit_json_result,
     format_status_badge,
+    interactive_stdin,
     is_success,
+    json_fail,
+    json_ok,
     read_client,
     require_success,
+    resolve_identifier_with_notice,
     status_code_of,
 )
-from mdf.cli.preflight import resolve_dataset_identifier
 
 app = typer.Typer(
     help="Dataset utilities (cite, open, preview, versions, ...)",
@@ -29,16 +35,26 @@ app = typer.Typer(
 )
 
 
-def _resolve_identifier_with_notice(client: BackendClient, raw_id: str) -> str:
-    resolved_id = resolve_dataset_identifier(raw_id, client)
-    if resolved_id != raw_id:
-        console.print(
-            f"[secondary]Resolved DOI to source ID:[/secondary] {theme.ident(resolved_id)}"
-        )
-    return resolved_id
+def _resolve_identifier_with_notice(
+    client: BackendClient, raw_id: str, *, json_mode: bool = False
+) -> str:
+    """Thin alias for the shared resolver — see ``formatting.resolve_identifier_with_notice``."""
+    return resolve_identifier_with_notice(client, raw_id, json_mode=json_mode)
 
 
 _human_size = theme.human_size
+
+
+def _interactive_stdin() -> bool:
+    """True when there is a human on the other end who can answer a prompt."""
+    return interactive_stdin()
+
+
+def _confirm_or_abort(question: str, *, yes: bool, json_mode: bool = False) -> None:
+    """Thin alias for the shared gate — see ``formatting.confirm_or_abort``."""
+    confirm_or_abort(
+        question, yes=yes, json_mode=json_mode, is_interactive=_interactive_stdin
+    )
 
 
 def _copy_to_clipboard(text: str) -> None:
@@ -82,16 +98,16 @@ def cite(
         mdf dataset cite my_dataset --copy                # Copy to clipboard
     """
     resolved = resolve_service(service)
-    client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
-    source_id = _resolve_identifier_with_notice(client, source_id)
+    client = read_client(
+        api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output
+    )
+    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
     with api_spinner("Fetching citation..."):
         result = client.get_citation(source_id, format=format, version=version)
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not is_success(result):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if not is_success(result):
@@ -137,7 +153,7 @@ def open_dataset(
     """
     resolved = resolve_service(service)
     client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
-    source_id = _resolve_identifier_with_notice(client, source_id)
+    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=url)
     with api_spinner("Loading dataset..."):
         result = client.get_card(source_id, version=version)
     client.close()
@@ -153,6 +169,7 @@ def open_dataset(
         target_url = f"https://materialsdatafacility.org/datasets/{source_id}"
 
     if url:
+        # `--url` is machine output: the URL is the whole payload on stdout.
         print(target_url)
     else:
         console.print(f"[secondary]Opening:[/secondary] {escape(target_url)}")
@@ -176,8 +193,10 @@ def preview(
         mdf dataset preview my_dataset_v1 --sample
     """
     resolved = resolve_service(service)
-    client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
-    source_id = _resolve_identifier_with_notice(client, source_id)
+    client = read_client(
+        api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output
+    )
+    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
 
     if sample:
         with api_spinner("Loading sample..."):
@@ -193,8 +212,9 @@ def preview(
     # dataset (typo'd source_id) must keep normal error handling.
     _payload_text = str(result.get("detail") or result.get("error") or "").lower()
     if status_code_of(result) == 404 and "profile" in _payload_text:
+        # Expected empty state, not a failure: `success: true`, exit 0.
         if json_output:
-            print(json.dumps(result, indent=2))
+            json_ok(result)
             return
         console.print()
         console.print(theme.empty_panel(
@@ -209,9 +229,7 @@ def preview(
         return
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not is_success(result):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if not is_success(result):
@@ -288,27 +306,24 @@ def versions(
         mdf dataset versions my_dataset_v1
     """
     resolved = resolve_service(service)
-    client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
-    source_id = _resolve_identifier_with_notice(client, source_id)
+    client = read_client(
+        api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output
+    )
+    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
     with api_spinner("Loading versions..."):
         result = client.versions(source_id, limit=limit, offset=offset)
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
+        emit_json_result(result)
         return
 
     if not is_success(result):
-        message = result.get("error") or result.get("detail") or "No versions found"
-        console.print()
-        console.print(theme.empty_panel(
-            escape(str(message)),
-            title="no versions",
-            hints=[f"confirm the dataset exists with `mdf show {source_id}`"],
-        ))
-        return
+        # A 404/401/500 is a failure, not an empty version history: route it
+        # through the shared exit-code table instead of exiting 0.
+        require_success(result, error_prefix="Versions failed")
 
-    version_list = result.get("versions", [])
+    version_list = result.get("versions") or []
     if not version_list:
         console.print()
         console.print(theme.empty_panel(
@@ -367,16 +382,16 @@ def diff(
         mdf dataset diff my_dataset_v1 --from 1.0 --to 2.0
     """
     resolved = resolve_service(service)
-    client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
-    source_id = _resolve_identifier_with_notice(client, source_id)
+    client = read_client(
+        api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output
+    )
+    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
     with api_spinner("Loading diff..."):
         result = client.version_diff(source_id, from_version, to_version)
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not is_success(result):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if not is_success(result):
@@ -452,21 +467,24 @@ def edit(
         fields["keywords"] = keywords
 
     if not fields:
+        message = "No fields provided to edit."
+        hint = "use --title, --description, or --keyword"
+        if json_output:
+            client.close()
+            json_fail(kind="validation", message=message, hint=hint)
         console.print(theme.error_panel(
-            "No fields provided to edit.",
+            message,
             title="Nothing to edit",
-            hint="use --title, --description, or --keyword",
+            hint=hint,
         ))
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_USAGE)
 
     with api_spinner("Editing metadata..."):
         result = client.edit_metadata(source_id, version=version, **fields)
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not is_success(result):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if is_success(result):
@@ -500,26 +518,25 @@ def withdraw(
         mdf dataset withdraw my_dataset_v1
         mdf dataset withdraw my_dataset_v1 --reason "Duplicate submission"
     """
-    import sys
     resolved = resolve_service(service)
-    if not yes and sys.stdin.isatty():
-        if not typer.confirm(f"Withdraw {source_id}? This removes it from the curation queue.", default=False):
-            raise typer.Exit(code=1)
+    _confirm_or_abort(
+        f"Withdraw {source_id}? This removes it from the curation queue.",
+        yes=yes,
+        json_mode=json_output,
+    )
     client = BackendClient.authenticated(
         base_url=api_url,
         token=token,
         service_instance=resolved,
         dev_user_id=dev_user,
     )
-    source_id = _resolve_identifier_with_notice(client, source_id)
+    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
     with api_spinner("Withdrawing..."):
         result = client.withdraw(source_id, reason=reason or "", version=version)
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not is_success(result):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if is_success(result):
@@ -540,6 +557,7 @@ def resubmit(
     source_id: str = typer.Argument(..., help="Source ID of rejected dataset to resubmit"),
     notes: Optional[str] = typer.Option(None, "--notes", "-n", help="Notes for the curator"),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Target version"),
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt"),
     json_output: bool = typer.Option(False, "--json", help="JSON output"),
     service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
     api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
@@ -550,23 +568,29 @@ def resubmit(
 
     Examples:
         mdf dataset resubmit my_dataset_v1 --notes "Fixed title and added authors"
+        mdf dataset resubmit my_dataset_v1 --yes          # no confirmation prompt
     """
     resolved = resolve_service(service)
+    # Resubmitting puts the dataset back in front of curators, so it confirms
+    # like `withdraw` does — and `--yes` is what makes it scriptable.
+    _confirm_or_abort(
+        f"Resubmit {source_id} to the curation queue?",
+        yes=yes,
+        json_mode=json_output,
+    )
     client = BackendClient.authenticated(
         base_url=api_url,
         token=token,
         service_instance=resolved,
         dev_user_id=dev_user,
     )
-    source_id = _resolve_identifier_with_notice(client, source_id)
+    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
     with api_spinner("Resubmitting..."):
         result = client.resubmit(source_id, notes=notes or "", version=version)
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not is_success(result):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if is_success(result):

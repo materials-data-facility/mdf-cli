@@ -30,13 +30,26 @@ from mdf.core.backend_client import BackendClient, _api_url_for_service
 from mdf.core.config import GlobalConfig, resolve_service
 from mdf.cli import theme
 from mdf.cli.formatting import (
+    EXIT_AUTH,
+    EXIT_CODE_BY_KIND,
+    EXIT_ERROR,
+    EXIT_NETWORK,
+    EXIT_USAGE,
     api_spinner,
+    chrome,
     classify_api_error,
     console,
+    emit_json,
+    emit_json_result,
+    exit_code_for,
     format_status_badge,
     is_success,
+    json_fail,
+    json_ok,
     read_client,
     require_success,
+    resolve_identifier_with_notice,
+    status_code_of,
 )
 from mdf.cli.backend import app as backend_app
 from mdf.cli.stream import app as stream_app
@@ -46,7 +59,6 @@ from mdf.cli.admin_cmd import app as admin_app
 from mdf.cli.skill_cmd import app as skill_app
 from mdf.cli.preflight import (
     auth_ready,
-    resolve_dataset_identifier,
     run_preflight,
     suggest_data_sources,
 )
@@ -240,13 +252,11 @@ def _render_preflight(preflight: Dict[str, Any], title: str = "Preflight") -> No
         console.print(theme.check_line("ok", "No preflight issues detected.", indent=0))
 
 
-def _resolve_identifier_with_notice(client: BackendClient, raw_id: str) -> str:
-    resolved_id = resolve_dataset_identifier(raw_id, client)
-    if resolved_id != raw_id:
-        console.print(
-            f"[secondary]Resolved DOI to source ID:[/secondary] {theme.ident(resolved_id)}"
-        )
-    return resolved_id
+def _resolve_identifier_with_notice(
+    client: BackendClient, raw_id: str, *, json_mode: bool = False
+) -> str:
+    """Thin alias for the shared resolver — see ``formatting.resolve_identifier_with_notice``."""
+    return resolve_identifier_with_notice(client, raw_id, json_mode=json_mode)
 
 
 def _extract_feedback_fields(record: Dict[str, Any]) -> List[tuple[str, str]]:
@@ -559,6 +569,20 @@ def _render_clone_plan(plan: Dict[str, Any]) -> None:
     console.print(theme.panel(detail, title="Clone plan"))
 
 
+def _clone_transfer_task_rows(detail: Any, result: Dict[str, Any]) -> None:
+    """Add the Globus Transfer task rows — every task id, not just the first."""
+    task_ids = result.get("task_ids") or [
+        t for t in [result.get("task_id")] if t
+    ]
+    if not task_ids:
+        return
+    label = "Transfer task" if len(task_ids) == 1 else "Transfer tasks"
+    detail.add_row(label, "\n".join(theme.ident(t) for t in task_ids))
+    monitor = result.get("monitor_url")
+    if monitor:
+        detail.add_row("Monitor", escape(str(monitor)))
+
+
 def _render_clone_result(result: Dict[str, Any], derive: bool = False) -> None:
     if result.get("success"):
         queued_transfer = result.get("method") == "transfer" and result.get("task_id")
@@ -572,8 +596,13 @@ def _render_clone_result(result: Dict[str, Any], derive: bool = False) -> None:
         detail.add_row("Path", escape(str(result["path"])))
         if queued_transfer:
             detail.add_row("Status", "Waiting on Globus Transfer to finish")
-            detail.add_row("Transfer task", theme.ident(result["task_id"]))
-            detail.add_row("Monitor", escape(str(result["monitor_url"])))
+            _clone_transfer_task_rows(detail, result)
+        # A "successful" result can still be partial (e.g. an extra data source
+        # that could not be queued) — never swallow that.
+        if result.get("partial"):
+            detail.add_row("Completeness", theme.mark("active", "partial — see errors below", style="warn"))
+        for err in result.get("errors") or []:
+            detail.add_row("Error", theme.mark("err", escape(str(err))))
         if derive:
             detail.add_row("Lineage", theme.mark("ok", "mdf.yaml written with derived-from", style="ok"))
 
@@ -594,12 +623,21 @@ def _render_clone_result(result: Dict[str, Any], derive: bool = False) -> None:
     downloaded = result.get("files_count", 0)
     failed = result.get("failed_count")
     if result.get("partial") and result.get("errors"):
-        lines = [f"Downloaded {theme.number(downloaded)} file(s)."]
+        is_transfer = result.get("method") == "transfer"
+        task_ids = result.get("task_ids") or [t for t in [result.get("task_id")] if t]
+        if is_transfer:
+            lines = [f"Queued {theme.number(len(task_ids))} Globus Transfer task(s)."]
+        else:
+            lines = [f"Downloaded {theme.number(downloaded)} file(s)."]
         if failed is not None:
             lines.append(f"Failed {theme.number(failed)} file(s).")
         lines.append(f"[label]Path:[/label] {escape(str(result.get('path')))}")
+        for task_id in task_ids:
+            lines.append(f"[label]Transfer task:[/label] {theme.ident(task_id)}")
+        if result.get("monitor_url"):
+            lines.append(f"[label]Monitor:[/label] {escape(str(result['monitor_url']))}")
         lines.append("")
-        lines.append("[bold]Failed files[/bold]")
+        lines.append("[bold]Failures[/bold]" if is_transfer else "[bold]Failed files[/bold]")
         for err in result.get("errors", []):
             lines.append(f"  {theme.mark('err', escape(str(err)))}")
         lines.append("")
@@ -610,7 +648,11 @@ def _render_clone_result(result: Dict[str, Any], derive: bool = False) -> None:
         console.print(
             theme.panel(
                 "\n".join(lines),
-                title=f"{theme.ACTIVE} Clone partially completed",
+                title=(
+                    f"{theme.ACTIVE} Transfer partially queued"
+                    if is_transfer
+                    else f"{theme.ACTIVE} Clone partially completed"
+                ),
                 border="yellow",
                 title_style="warn",
             )
@@ -772,8 +814,17 @@ def setup(
 def login(
     service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance (staging/prod/dev)"),
     token: Optional[str] = typer.Option(None, "--token", help="Use an explicit access token"),
+    no_browser: bool = typer.Option(
+        False,
+        "--no-browser",
+        help="Never auto-open a browser; print the URL and wait for the pasted code",
+    ),
 ):
     """Authenticate with Globus.
+
+    The login URL is always printed first, then a browser is opened only if this
+    looks like a desktop session. Use --no-browser (or set MDF_NO_BROWSER=1) on
+    headless hosts where a text browser would take over the terminal.
 
     For scripts and CI, you can skip interactive login entirely:
 
@@ -820,7 +871,10 @@ def login(
             _reject_token(str(error))
     else:
         scope, _rs = get_scopes_for_service(resolved)
-        get_authorizer_for_scopes([scope, DATA_MDF_SCOPE, TRANSFER_SCOPE, GROUPS_SCOPE])
+        get_authorizer_for_scopes(
+            [scope, DATA_MDF_SCOPE, TRANSFER_SCOPE, GROUPS_SCOPE],
+            no_browser=no_browser,
+        )
 
     detail = theme.detail_table(label_width=12)
     detail.add_row("Service", theme.ident(resolved))
@@ -896,10 +950,14 @@ def status(
         else:
             method = None
 
-        status_str = "authenticated" if method else "not authenticated"
+        authenticated = bool(method)
+        status_str = "authenticated" if authenticated else "not authenticated"
 
+        # `success` is the answer to "am I authenticated?", not "did this
+        # command run" — an unauthenticated caller must be able to branch on it
+        # (and on the exit code) without parsing the status string.
         result = {
-            "success": True,
+            "success": authenticated,
             "service": resolved,
             "status": status_str,
             "method": method,
@@ -909,7 +967,13 @@ def status(
         }
 
         if json_output:
-            print(json.dumps(result, indent=2))
+            if not authenticated:
+                json_fail(
+                    kind="auth",
+                    message="Not authenticated",
+                    extra={k: v for k, v in result.items() if k != "success"},
+                )
+            emit_json(result)
             return
 
         _render_identity(
@@ -920,6 +984,8 @@ def status(
             env_token=env_token,
             env_client=env_client,
         )
+        if not authenticated:
+            raise typer.Exit(code=EXIT_AUTH)
         return
 
     lookup_id = source_id
@@ -927,6 +993,12 @@ def status(
         cfg = GlobalConfig()
         lookup_id = cfg.last_source_id
         if not lookup_id:
+            if json_output:
+                json_fail(
+                    kind="validation",
+                    message="No source_id provided and no last published dataset.",
+                    hint="usage: mdf status <source_id> — or list yours with `mdf list`",
+                )
             console.print()
             console.print(theme.empty_panel(
                 "No source_id provided and no last published dataset.",
@@ -936,7 +1008,7 @@ def status(
                     "list your submissions with `mdf list`",
                 ],
             ))
-            return
+            raise typer.Exit(code=EXIT_USAGE)
 
     # --watch mode: poll until terminal state (absorbs old watch)
     if watch:
@@ -946,7 +1018,7 @@ def status(
             service_instance=resolved,
             dev_user_id=dev_user,
         )
-        lookup_id = _resolve_identifier_with_notice(client, lookup_id)
+        lookup_id = _resolve_identifier_with_notice(client, lookup_id, json_mode=json_output)
         client.close()
 
         raise typer.Exit(
@@ -970,14 +1042,19 @@ def status(
         service_instance=resolved,
         dev_user_id=dev_user,
     )
-    lookup_id = _resolve_identifier_with_notice(client, lookup_id)
+    lookup_id = _resolve_identifier_with_notice(client, lookup_id, json_mode=json_output)
     with api_spinner("Checking status..."):
         result = client.status(lookup_id, version=version)
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
+        emit_json_result(result)
         return
+
+    if not is_success(result):
+        # A 404/401/500 is not a status: report it with the mapped exit code
+        # instead of rendering an empty panel and exiting 0.
+        require_success(result, error_prefix="Status failed")
 
     _render_status_details(result, lookup_id)
 
@@ -1083,31 +1160,53 @@ def publish(
 
     if preflight_only:
         if json_output:
-            print(json.dumps(preflight, indent=2))
-        else:
-            _render_preflight(preflight)
+            if not preflight.get("success"):
+                json_fail(
+                    kind="validation",
+                    message="Preflight found blocking issues",
+                    hint="fix the reported issues, then re-run `mdf publish --preflight-only`",
+                    extra={"preflight": preflight},
+                )
+            # Shape unchanged: --preflight-only has always emitted the
+            # preflight report itself (it already carries `success`).
+            json_ok(preflight)
+            return
+        _render_preflight(preflight)
         if not preflight.get("success"):
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_USAGE)
         return
 
     if not preflight.get("success"):
         if json_output:
-            print(json.dumps({"success": False, "preflight": preflight}, indent=2))
-        else:
-            _render_preflight(preflight)
-            console.print()
-            console.print(theme.error_panel(
-                "Publish blocked by preflight issues",
-                title="Blocked",
-                hint="fix the ✗ items above, then re-run `mdf publish --preflight-only`",
-            ))
-        raise typer.Exit(code=1)
+            json_fail(
+                kind="validation",
+                message="Publish blocked by preflight issues",
+                hint="fix the reported issues, then re-run `mdf publish --preflight-only`",
+                extra={"preflight": preflight},
+            )
+        _render_preflight(preflight)
+        console.print()
+        console.print(theme.error_panel(
+            "Publish blocked by preflight issues",
+            title="Blocked",
+            hint="fix the ✗ items above, then re-run `mdf publish --preflight-only`",
+        ))
+        raise typer.Exit(code=EXIT_USAGE)
 
-    payload = agent.build_submission(test=test, update=update)
+    try:
+        payload = agent.build_submission(test=test, update=update)
+    except (RuntimeError, ValueError) as exc:
+        _abort_on_exception(
+            exc,
+            json_output=json_output,
+            title="Could not build the submission",
+            hint="fix the manifest (`mdf config validate`), then re-run `mdf publish`",
+            kind="validation",
+        )
 
     if dry_run:
         if json_output:
-            print(json.dumps({"success": True, "dry_run": True, "payload": payload, "preflight": preflight}, indent=2))
+            emit_json({"success": True, "dry_run": True, "payload": payload, "preflight": preflight})
             return
         _render_preflight(preflight, title="Publish preflight")
         target = api_url or _api_url_for_service(resolved)
@@ -1141,18 +1240,15 @@ def publish(
                 on_file_done=transfer.on_file_done,
             )
     except RuntimeError as exc:
-        console.print()
-        console.print(theme.error_panel(
-            escape(str(exc)),
+        _abort_on_exception(
+            exc,
+            json_output=json_output,
             title="Upload failed",
             hint="check connectivity with `mdf config doctor`, then retry `mdf publish --submit`",
-        ))
-        raise typer.Exit(code=1)
+        )
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not result.get("success"):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if result.get("success"):
@@ -1250,8 +1346,7 @@ def clone(
 
     if json_output:
         if not plan.get("success"):
-            print(json.dumps(plan, indent=2))
-            raise typer.Exit(code=1)
+            json_fail(plan, extra={"plan": plan})
     else:
         if not plan.get("success"):
             _render_clone_result(plan)
@@ -1288,19 +1383,15 @@ def clone(
     except typer.Exit:
         raise
     except Exception as exc:
-        console.print()
-        console.print(theme.error_panel(
-            escape(str(exc)),
+        _abort_on_exception(
+            exc,
+            json_output=json_output,
             title="Clone failed",
             hint="try `mdf clone <id> --transfer` for cross-endpoint / Globus-only datasets",
-        ))
-        raise typer.Exit(code=1)
+        )
 
     if json_output:
-        payload = {"plan": plan, "result": result}
-        print(json.dumps(payload, indent=2))
-        if not result.get("success"):
-            raise typer.Exit(code=1)
+        emit_json_result(result, {"plan": plan, "result": result}, extra={"plan": plan, "result": result})
         return
 
     if derive:
@@ -1319,15 +1410,120 @@ def clone(
     _render_clone_result(result, derive=derive)
 
 
+def _abort_on_exception(
+    exc: BaseException,
+    *,
+    json_output: bool,
+    title: str,
+    hint: str,
+    kind: str = "network",
+) -> None:
+    """Turn an uncaught exception at a command boundary into the shared contract.
+
+    Under ``--json`` stdout gets the one error envelope (never Rich markup);
+    human mode keeps the familiar panel. Both exit with the code
+    :data:`EXIT_CODE_BY_KIND` maps ``kind`` to, so the two modes never disagree
+    about ``$?``. Never returns.
+    """
+    if json_output:
+        json_fail(kind=kind, message=str(exc), hint=hint)
+    console.print()
+    console.print(theme.error_panel(
+        escape(str(exc)),
+        title=title,
+        hint=hint,
+    ))
+    raise typer.Exit(code=EXIT_CODE_BY_KIND.get(kind, EXIT_ERROR))
+
+
+def _render_search_facets(
+    facets: Optional[Dict[str, Any]], active: Optional[Dict[str, Any]] = None
+) -> None:
+    """Print the backend's facet buckets, with the flag that selects each one.
+
+    The backend returns display names (``Year``, ``Organization``, ``Authors``,
+    ``Keywords``, ``Domains``); the matching CLI flags are singular, so the
+    header spells out the flag to make the facets actionable rather than
+    decorative.
+    """
+    if not facets or not isinstance(facets, dict):
+        return
+
+    flag_for = {
+        "year": "--year",
+        "organization": "--organization",
+        "authors": "--author",
+        "author": "--author",
+        "keywords": "--keyword",
+        "keyword": "--keyword",
+        "domains": "--domain",
+        "domain": "--domain",
+    }
+    selected = {
+        name: {str(value) for value in values}
+        for name, values in (active or {}).items()
+    }
+
+    rows: List[tuple] = []
+    for display_name, buckets in facets.items():
+        if not buckets:
+            continue
+        flag = flag_for.get(str(display_name).lower())
+        chosen = selected.get((flag or "").lstrip("-"), set())
+        rendered = []
+        for bucket in buckets[:6]:
+            if not isinstance(bucket, dict):
+                continue
+            value = str(bucket.get("value", ""))
+            count = bucket.get("count")
+            label = f"{escape(value)} [secondary]({theme.number(count)})[/secondary]"
+            if value in chosen:
+                label = f"[ok]{theme.OK}[/ok] {label}"
+            rendered.append(label)
+        if rendered:
+            rows.append((str(display_name), flag, rendered))
+    if not rows:
+        return
+
+    # The label column carries the *flag*, not the backend's display name: it
+    # is what the reader has to type to apply the facet, and it fits.
+    console.print("\n[bold]Facets[/bold] [secondary](filter with the flag shown)[/secondary]")
+    table = theme.detail_table(label_width=15)
+    for display_name, flag, rendered in rows:
+        table.add_row(flag or display_name, "  ".join(rendered))
+    console.print(table)
+
+
 # ---------------------------------------------------------------------------
 # Explore commands
 # ---------------------------------------------------------------------------
 
 @app.command("search", rich_help_panel=PANEL_EXPLORE)
 def search(
-    query: str = typer.Argument(..., help="Search query"),
+    query: Optional[str] = typer.Argument(
+        None, help="Search query (omit to browse the newest published datasets)"
+    ),
     search_type: str = typer.Option("all", "--type", "-t", help="all, datasets, or streams"),
-    limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
+    limit: int = typer.Option(20, "--limit", "-n", help="Page size (backend max 50)"),
+    offset: int = typer.Option(0, "--offset", help="Skip the first N results (paging)"),
+    sort: Optional[str] = typer.Option(
+        None, "--sort", help="relevance (default), newest, or most_viewed"
+    ),
+    year: Optional[List[str]] = typer.Option(
+        None, "--year", help="Filter by publication year, e.g. 2021 (repeatable)"
+    ),
+    organization: Optional[List[str]] = typer.Option(
+        None, "--organization", help="Filter by organization, e.g. 'MDF Open' (repeatable)"
+    ),
+    author: Optional[List[str]] = typer.Option(
+        None, "--author", help="Filter by author as 'Family, Given' (repeatable)"
+    ),
+    keyword: Optional[List[str]] = typer.Option(
+        None, "--keyword", help="Filter by keyword/subject (repeatable)"
+    ),
+    domain: Optional[List[str]] = typer.Option(
+        None, "--domain", help="Filter by scientific domain (repeatable)"
+    ),
     semantic: bool = typer.Option(
         False,
         "--semantic",
@@ -1342,15 +1538,59 @@ def search(
 ):
     """Search public datasets and streams.
 
+    The query is optional: with no query this browses the newest published
+    datasets, in the same shape as a keyword search. Filter flags take whole
+    facet values (as printed under "Facets" / returned in `facets`) and are
+    repeatable — repeating one ORs the values together.
+
     Examples:
         mdf search "perovskite"
+        mdf search                                  # browse the newest datasets
         mdf search "XRD" --type streams
-        mdf search "iron oxide" --limit 5
+        mdf search "band gap" --year 2021 --limit 5
+        mdf search --organization "MDF Open" --sort newest
+        mdf search "alloy" --author "Ward, Logan" --author "Wolverton, Chris"
         mdf search "perovskite" --json --brief
         mdf search "battery cathode materials" --semantic
     """
+    filters = {
+        "year": year,
+        "organization": organization,
+        "author": author,
+        "keyword": keyword,
+        "domain": domain,
+    }
+    active_filters = {name: values for name, values in filters.items() if values}
+
+    def _usage(message: str, hint: str) -> None:
+        if json_output:
+            json_fail(kind="validation", message=message, hint=hint)
+        console.print()
+        console.print(theme.error_panel(escape(message), title="Bad option", hint=hint))
+        raise typer.Exit(code=EXIT_USAGE)
+
+    if sort and sort not in BackendClient.SEARCH_SORTS:
+        _usage(
+            f"Unsupported --sort value: {sort}",
+            f"use one of {', '.join(BackendClient.SEARCH_SORTS)}",
+        )
+    if semantic and not query:
+        _usage(
+            "--semantic needs a query to embed.",
+            "give it a phrase, or drop --semantic to browse the newest datasets",
+        )
+    if semantic and (active_filters or sort or offset):
+        # /search/semantic takes only q + limit; silently dropping the filters
+        # would hand back an unfiltered answer that looks filtered.
+        _usage(
+            "--semantic does not support facet filters, --sort or --offset.",
+            "drop --semantic for faceted keyword search, or drop the filters",
+        )
+
     resolved = resolve_service(service)
-    client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
+    client = read_client(
+        api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output
+    )
 
     with api_spinner("Searching (semantic)..." if semantic else "Searching..."):
         if semantic:
@@ -1361,53 +1601,77 @@ def search(
             if not result.get("results") and any(
                 kw in detail.lower() for kw in ("auth", "token", "credential", "401", "unauthorized")
             ):
-                if json_output:
-                    print(json.dumps(result, indent=2))
-                else:
-                    console.print()
-                    console.print(theme.error_panel(
-                        "Semantic search requires login.",
-                        title="Login required",
-                        border="yellow",
-                        hint=f"run `mdf login --service {resolved}`, then retry with --semantic",
-                    ))
                 client.close()
-                return
+                if json_output:
+                    json_fail(
+                        result,
+                        kind="auth",
+                        message="Semantic search requires login.",
+                        code=status_code_of(result) or 401,
+                        hint=f"run `mdf login --service {resolved}`, then retry with --semantic",
+                    )
+                console.print()
+                console.print(theme.error_panel(
+                    "Semantic search requires login.",
+                    title="Login required",
+                    border="yellow",
+                    hint=f"run `mdf login --service {resolved}`, then retry with --semantic",
+                ))
+                raise typer.Exit(code=EXIT_AUTH)
             if not result.get("available", True):
                 reason = result.get("reason") or "Semantic search unavailable"
-                if json_output:
-                    print(json.dumps(result, indent=2))
-                else:
-                    console.print()
-                    console.print(theme.error_panel(
-                        "Semantic search unavailable",
-                        title="Semantic search",
-                        border="yellow",
-                        detail=escape(str(reason)),
-                        hint="keyword search still works: drop --semantic",
-                    ))
                 client.close()
-                return
+                if json_output:
+                    # An unbuilt snapshot is a service-availability answer, not a
+                    # bad request: keep the payload, mark it as such.
+                    json_fail(
+                        result,
+                        kind="server",
+                        message="Semantic search unavailable",
+                        hint="keyword search still works: drop --semantic",
+                    )
+                console.print()
+                console.print(theme.error_panel(
+                    "Semantic search unavailable",
+                    title="Semantic search",
+                    border="yellow",
+                    detail=escape(str(reason)),
+                    hint="keyword search still works: drop --semantic",
+                ))
+                raise typer.Exit(code=EXIT_NETWORK)
             # Normalize shape so downstream rendering matches keyword search
             result.setdefault("query", query)
             result.setdefault("total", len(result.get("results") or []))
         else:
-            result = client.search(query, search_type=search_type, limit=limit)
+            result = client.search(
+                query,
+                search_type=search_type,
+                limit=limit,
+                offset=offset,
+                sort=sort,
+                **filters,
+            )
     client.close()
 
     if json_output:
+        if not is_success(result):
+            json_fail(result)
         if brief:
             items = []
-            for item in result.get("results", []):
+            # A backend that answers `"results": null` is an empty result set,
+            # not a crash.
+            for item in result.get("results") or []:
                 entry = {
                     "title": item.get("title", ""),
                     "authors": item.get("authors", []),
                     "doi": item.get("doi", ""),
                 }
                 items.append(entry)
-            print(json.dumps(items, indent=2))
+            # A bare list has nowhere to carry `success`; it stays a list so
+            # existing --brief callers keep working.
+            emit_json(items)
         else:
-            print(json.dumps(result, indent=2))
+            json_ok(result)
         return
 
     if not result.get("results") and not is_success(result):
@@ -1422,14 +1686,17 @@ def search(
             hint=info["hint"],
             border=info["border"] or "red",
         ))
-        return
+        raise typer.Exit(code=exit_code_for(result))
 
     if result.get("results"):
         total = result.get("total", 0)
-        console.print(
-            f"\n{theme.SEARCH} [bold]Found[/bold] {theme.number(total)} [bold]results for[/bold] "
-            f"[accent]'{escape(str(result.get('query')))}'[/accent]\n"
+        shown = len(result["results"])
+        subject = (
+            f"[bold]results for[/bold] [accent]'{escape(str(result.get('query')))}'[/accent]"
+            if result.get("query")
+            else "[bold]newest datasets[/bold]"
         )
+        console.print(f"\n{theme.SEARCH} [bold]Found[/bold] {theme.number(total)} {subject}\n")
 
         table = theme.table()
         table.add_column("#", style="secondary", width=3, justify="right")
@@ -1439,7 +1706,7 @@ def search(
         table.add_column("Status", no_wrap=True)
         table.add_column("DOI", style="secondary", max_width=24)
 
-        for i, item in enumerate(result["results"], 1):
+        for i, item in enumerate(result["results"], offset + 1):
             if item.get("type") == "dataset":
                 table.add_row(
                     str(i),
@@ -1460,26 +1727,62 @@ def search(
                 )
 
         console.print(table)
+        _render_search_facets(result.get("facets"), active_filters)
+
+        next_steps = []
         first = result["results"][0]
         if first.get("source_id"):
-            console.print(f"\n[hint]Next: mdf show {escape(str(first['source_id']))}[/hint]")
+            next_steps.append(f"mdf show {escape(str(first['source_id']))}")
+        if isinstance(total, int) and offset + shown < total:
+            next_steps.append(f"--offset {offset + shown} for the next page")
+        if next_steps:
+            console.print(f"\n[hint]Next: {' | '.join(next_steps)}[/hint]")
     else:
-        hints = [f"broaden the query, e.g. `mdf search \"{escape(query.split()[0] if query.split() else query)}\"`"]
-        if not semantic:
+        subject = f"'{escape(query)}'" if query else "the current filters"
+        hints = []
+        if active_filters:
+            hints.append(
+                "drop a filter: "
+                + ", ".join(f"--{name}" for name in sorted(active_filters))
+            )
+        if query:
+            hints.append(
+                f"broaden the query, e.g. `mdf search \"{escape(query.split()[0] if query.split() else query)}\"`"
+            )
+        if not semantic and query:
             hints.append("try `--semantic` for meaning-based matching")
         hints.append("list your own submissions with `mdf list`")
         console.print()
         console.print(theme.empty_panel(
-            f"No results found for '{escape(query)}'",
+            f"No results found for {subject}",
             title="no matches",
             hints=hints,
         ))
+        _render_search_facets(result.get("facets"), active_filters)
+
+
+#: Hard stop on how many ``/submissions`` pages one `mdf list` will walk, so a
+#: broad client-side ``--search`` can never turn into an unbounded crawl.
+_LIST_MAX_PAGES = 20
+
+
+def _parse_submission_mdata(sub: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a submission's ``dataset_mdata`` as a dict (it may arrive as JSON text)."""
+    mdata = sub.get("dataset_mdata", {})
+    if isinstance(mdata, str):
+        try:
+            mdata = json.loads(mdata)
+        except Exception:
+            mdata = {}
+    return mdata if isinstance(mdata, dict) else {}
 
 
 @app.command("list", rich_help_panel=PANEL_EXPLORE)
 def list_datasets(
     limit: int = typer.Option(50, "--limit", "-n", help="Max results"),
-    status_filter: Optional[str] = typer.Option(None, "--status", help="Filter by status"),
+    status_filter: Optional[str] = typer.Option(
+        None, "--status", help="Filter by status server-side (comma-separated for several)"
+    ),
     search: Optional[str] = typer.Option(None, "--search", help="Filter by title, source ID, or DOI"),
     latest_only: bool = typer.Option(False, "--latest-only", help="Only show latest versions"),
     service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
@@ -1490,9 +1793,23 @@ def list_datasets(
 ):
     """List your submitted datasets.
 
+    `--limit` and `--status` are applied by the backend, and pages are followed
+    via the response's `next_key` cursor until `--limit` records are collected —
+    so a dataset outside the first page is still found. `--search` and
+    `--latest-only` have no server-side equivalent and are applied to each page
+    as it arrives.
+
+    Under `--json` the echoed `next_key` is a safe resume point: if `--limit`
+    filled up part-way through a page, it points at that same page (flagged
+    `"partial_page": true`) rather than past the records that were never read.
+    A page that fails mid-walk is reported as a failure (non-zero exit, error
+    envelope) with whatever was already collected under `"partial": true`.
+
     Examples:
         mdf list
         mdf list --limit 50
+        mdf list --status published,rejected
+        mdf list --search perovskite --latest-only
     """
     resolved = resolve_service(service)
     client = BackendClient.authenticated(
@@ -1501,64 +1818,141 @@ def list_datasets(
         service_instance=resolved,
         dev_user_id=dev_user,
     )
+
+    wanted_statuses = {
+        part.strip() for part in (status_filter or "").split(",") if part.strip()
+    }
+    query = (search or "").strip().lower()
+    # `--search`/`--latest-only` have no server-side equivalent, so they need
+    # material to filter: ask for full pages in that case. Otherwise the page
+    # size is just what the caller asked for.
+    client_side_filtering = bool(query or latest_only)
+    page_size = 50 if client_side_filtering else max(1, min(limit, 50))
+
+    filtered_submissions: List[tuple] = []
+    first_result: Optional[Dict[str, Any]] = None
+    result: Dict[str, Any] = {}
+    start_key: Optional[str] = None
+    # The cursor a caller may resume from. It only moves past a page once that
+    # page has been read to the end: handing back the *next* page's cursor
+    # after stopping mid-page would permanently skip the records we never
+    # looked at.
+    resume_key: Optional[str] = None
+    partial_page = False
+    # Set when a page request fails. Pages already collected are real data, but
+    # the listing is then incomplete and must never exit 0.
+    page_error: Optional[Dict[str, Any]] = None
+    pages = 0
+
     with api_spinner("Loading datasets..."):
-        result = client.submissions()
+        while True:
+            result = client.submissions(
+                status=status_filter or None,
+                limit=page_size,
+                start_key=start_key,
+                include_counts=(pages == 0),
+            )
+            if first_result is None:
+                first_result = result
+            if not is_success(result):
+                page_error = result
+                break
+
+            page = result.get("submissions", []) or []
+            scanned_whole_page = True
+            for index, sub in enumerate(page):
+                mdata = _parse_submission_mdata(sub)
+                # Keep the client-side status check as a backstop: a backend
+                # that ignores ?status= must not silently widen the result set.
+                if wanted_statuses and sub.get("status", "") not in wanted_statuses:
+                    continue
+                if latest_only and mdata.get("latest") is False:
+                    continue
+                if query:
+                    haystack = " ".join(
+                        str(value or "")
+                        for value in (
+                            sub.get("source_id"),
+                            sub.get("doi"),
+                            sub.get("dataset_doi"),
+                            sub.get("title"),
+                            mdata.get("title"),
+                        )
+                    ).lower()
+                    if query not in haystack:
+                        continue
+                filtered_submissions.append((sub, mdata))
+                if len(filtered_submissions) >= limit:
+                    # Anything after `index` on this page is still unread.
+                    scanned_whole_page = index == len(page) - 1
+                    break
+
+            pages += 1
+            if not scanned_whole_page:
+                # `--limit` filled up part-way through a page. Resume from the
+                # START of this page: re-reading a record is recoverable,
+                # skipping one is not.
+                resume_key = start_key
+                partial_page = True
+                break
+            start_key = result.get("next_key")
+            resume_key = start_key
+            if not start_key or len(filtered_submissions) >= limit or pages >= _LIST_MAX_PAGES:
+                break
     client.close()
 
-    submissions = result.get("submissions", [])
-    filtered_submissions = []
-    query = (search or "").strip().lower()
-    for sub in submissions:
-        mdata = sub.get("dataset_mdata", {})
-        if isinstance(mdata, str):
-            try:
-                mdata = json.loads(mdata)
-            except Exception:
-                mdata = {}
-        status_value = sub.get("status", "")
-        if status_filter and status_value != status_filter:
-            continue
-        if latest_only and isinstance(mdata, dict) and mdata.get("latest") is False:
-            continue
-        if query:
-            haystack = " ".join(
-                str(value or "")
-                for value in (
-                    sub.get("source_id"),
-                    sub.get("doi"),
-                    sub.get("dataset_doi"),
-                    sub.get("title"),
-                    mdata.get("title") if isinstance(mdata, dict) else "",
-                )
-            ).lower()
-            if query not in haystack:
-                continue
-        filtered_submissions.append((sub, mdata))
+    collected = [sub for sub, _mdata in filtered_submissions]
 
-    filtered_submissions = filtered_submissions[:limit]
-
-    if json_output:
-        filtered_result = dict(result)
-        filtered_result["submissions"] = [sub for sub, _mdata in filtered_submissions]
-        if "total" in filtered_result:
-            filtered_result["total"] = len(filtered_submissions)
-        if "count" in filtered_result:
-            filtered_result["count"] = len(filtered_submissions)
-        print(json.dumps(filtered_result, indent=2))
-        return
-
-    if not filtered_submissions and not is_success(result):
+    if page_error is not None:
+        # A mid-stream page failure is still a failure: report it with the
+        # mapped exit code and say how much of the listing was read.
+        partial = bool(collected)
+        if json_output:
+            json_fail(
+                page_error,
+                extra={
+                    "partial": partial,
+                    "pages_read": pages,
+                    "submissions": collected,
+                    "count": len(collected),
+                    "next_key": resume_key,
+                },
+            )
         # Distinguish "you have no datasets" from "we could not ask".
-        info = classify_api_error(result)
+        info = classify_api_error(page_error)
+        detail_parts = []
+        if info["detail"]:
+            detail_parts.append(escape(str(info["detail"])))
+        if partial:
+            detail_parts.append(
+                f"Partial results: {len(collected)} dataset(s) read from "
+                f"{pages} page(s) before the failure — the listing is incomplete."
+            )
         console.print()
         console.print(theme.error_panel(
             escape(str(info["message"])),
             title="Listing failed",
             code=info["code"],
-            detail=escape(str(info["detail"])) if info["detail"] else None,
+            detail="\n".join(detail_parts) or None,
             hint=info["hint"],
             border=info["border"] or "red",
         ))
+        raise typer.Exit(code=exit_code_for(page_error))
+
+    base_result = first_result if first_result is not None else result
+    if json_output:
+        filtered_result = dict(base_result)
+        filtered_result["submissions"] = collected
+        # `total` is the backend's overall count (from include_counts) and stays
+        # authoritative; `count` is how many records this response carries.
+        filtered_result["count"] = len(collected)
+        # Echo the cursor we stopped at so a caller can resume paging.
+        filtered_result["next_key"] = resume_key
+        if partial_page:
+            # `next_key` re-reads the page we stopped inside rather than
+            # skipping past the records after the cut.
+            filtered_result["partial_page"] = True
+        json_ok(filtered_result)
         return
 
     if not filtered_submissions:
@@ -1596,6 +1990,10 @@ def list_datasets(
             escape(str(updated)),
         )
     console.print(table)
+    if resume_key or partial_page:
+        console.print(
+            f"\n[hint]More records remain — raise --limit (currently {limit}) to fetch them.[/hint]"
+        )
 
 
 @app.command("related", rich_help_panel=PANEL_EXPLORE)
@@ -1621,16 +2019,24 @@ def related(
         mdf related 10.18126/xxxx --by similar --limit 10
     """
     if by not in ("author", "similar"):
+        if json_output:
+            json_fail(
+                kind="validation",
+                message=f"Unsupported relation type: {by}",
+                hint="use `--by author` or `--by similar`",
+            )
         console.print(theme.error_panel(
             f"Unsupported relation type: {escape(str(by))}",
             title="Bad option",
             hint="use `--by author` or `--by similar`",
         ))
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=EXIT_USAGE)
 
     resolved = resolve_service(service)
-    client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
-    resolved_id = _resolve_identifier_with_notice(client, source_id)
+    client = read_client(
+        api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output
+    )
+    resolved_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
 
     if by == "similar":
         spinner_text = "Finding similar datasets..."
@@ -1645,8 +2051,12 @@ def related(
     client.close()
 
     if json_output:
-        print(json.dumps(result, indent=2))
+        emit_json_result(result)
         return
+
+    if not is_success(result):
+        # "No relations" and "we could not ask" are different answers.
+        require_success(result, error_prefix="Related failed")
 
     if by == "similar" and result.get("available") is False:
         reason = result.get("reason") or "Embedding snapshot unavailable."
@@ -1744,8 +2154,10 @@ def show(
         mdf show my_dataset_v1 --json
     """
     resolved = resolve_service(service)
-    client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
-    source_id = _resolve_identifier_with_notice(client, source_id)
+    client = read_client(
+        api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output
+    )
+    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
     with api_spinner("Loading dataset..."):
         result = client.get_card(source_id, version=version)
         citation_result = None
@@ -1757,7 +2169,7 @@ def show(
         output = {"card": result}
         if citation_result:
             output["citation"] = citation_result
-        print(json.dumps(output, indent=2))
+        emit_json_result(result, output)
         return
 
     if not is_success(result):
@@ -1859,17 +2271,27 @@ def validate(
     elif data:
         from mdf.models.config import ManifestConfig
         agent = MDFAgent(manifest=ManifestConfig(data_sources=list(data)))
-        console.print(theme.check_line(
+        # Chrome: under --json this goes to stderr so stdout stays parseable.
+        chrome(json_output).print(theme.check_line(
             "active", "No mdf.yaml found — validating data paths only", indent=0
         ))
     else:
+        message = "No mdf.yaml found and no data paths provided"
+        hint = "run `mdf setup` to create a manifest, or pass data paths"
+        if json_output:
+            json_fail(
+                kind="validation",
+                message=message,
+                hint=hint,
+                extra={"errors": [message], "warnings": [], "preflight": None},
+            )
         console.print()
         console.print(theme.error_panel(
-            "No mdf.yaml found and no data paths provided",
+            message,
             title="Nothing to validate",
-            hint="run `mdf setup` to create a manifest, or pass data paths",
+            hint=hint,
         ))
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_USAGE)
 
     root = agent.root or Path.cwd()
     preflight = run_preflight(
@@ -1883,9 +2305,14 @@ def validate(
     warnings = [issue["message"] for issue in issues if issue["severity"] == "warning"]
 
     if json_output:
-        print(json.dumps({"success": not errors, "errors": errors, "warnings": warnings, "preflight": preflight}, indent=2))
         if errors:
-            raise typer.Exit(code=1)
+            json_fail(
+                kind="validation",
+                message=f"Validation failed: {len(errors)} blocking issue(s)",
+                hint="fix the reported errors, then re-run `mdf validate --json`",
+                extra={"errors": errors, "warnings": warnings, "preflight": preflight},
+            )
+        json_ok({"errors": errors, "warnings": warnings, "preflight": preflight})
         return
 
     _render_preflight(preflight, title="Validation")
@@ -1898,7 +2325,9 @@ def validate(
             detail=f"{len(errors)} blocking issue(s) must be fixed before publishing.",
             hint="fix the ✗ items above, then re-run `mdf validate`",
         ))
-        raise typer.Exit(code=1)
+        # Same code as `--json` (kind `validation`): blocking issues are a
+        # usage error, not a generic failure.
+        raise typer.Exit(code=EXIT_USAGE)
 
     console.print()
     console.print(theme.mark("ok", "Validation passed", style="ok.bold"))
@@ -1915,10 +2344,13 @@ def whoami(
     resolved = resolve_service(service)
     cached = is_logged_in(service_instance=resolved)
     env_token = bool(os.environ.get("MDF_CONNECT_TOKEN"))
-    status_str = "authenticated" if (cached or env_token) else "not authenticated"
+    authenticated = bool(cached or env_token)
+    status_str = "authenticated" if authenticated else "not authenticated"
 
+    # `success` answers "am I authenticated?" — it used to be hardcoded true,
+    # which made `mdf whoami --json` useless as a login probe.
     result = {
-        "success": True,
+        "success": authenticated,
         "service": resolved,
         "status": status_str,
         "token_store": str(DEFAULT_TOKEN_PATH),
@@ -1926,7 +2358,13 @@ def whoami(
     }
 
     if json_output:
-        print(json.dumps(result, indent=2))
+        if not authenticated:
+            json_fail(
+                kind="auth",
+                message="Not authenticated",
+                extra={k: v for k, v in result.items() if k != "success"},
+            )
+        emit_json(result)
         return
 
     _render_identity(
@@ -1935,6 +2373,8 @@ def whoami(
         token_store=str(DEFAULT_TOKEN_PATH),
         env_token=env_token,
     )
+    if not authenticated:
+        raise typer.Exit(code=EXIT_AUTH)
 
 
 @app.command("watch", hidden=True)
@@ -2125,6 +2565,7 @@ def resubmit_alias(
     source_id: str = typer.Argument(..., help="Source ID"),
     notes: Optional[str] = typer.Option(None, "--notes", "-n"),
     version: Optional[str] = typer.Option(None, "--version", "-v"),
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt"),
     json_output: bool = typer.Option(False, "--json"),
     service: Optional[str] = typer.Option(None, "--service", "-s"),
     api_url: Optional[str] = typer.Option(None, "--api-url"),
@@ -2133,7 +2574,7 @@ def resubmit_alias(
 ):
     """Resubmit a rejected dataset."""
     from mdf.cli.dataset_cmd import resubmit
-    resubmit(source_id=source_id, notes=notes, version=version,
+    resubmit(source_id=source_id, notes=notes, version=version, yes=yes,
              json_output=json_output, service=service, api_url=api_url, token=token, dev_user=dev_user)
 
 
@@ -2308,32 +2749,54 @@ def update_alias(
 
     if preflight_only:
         if json_output:
-            print(json.dumps(preflight, indent=2))
-        else:
-            _render_preflight(preflight, title="Update preflight")
+            if not preflight.get("success"):
+                json_fail(
+                    kind="validation",
+                    message="Preflight found blocking issues",
+                    hint="fix the reported issues, then re-run with --preflight-only",
+                    extra={"preflight": preflight},
+                )
+            # Shape unchanged: --preflight-only has always emitted the
+            # preflight report itself (it already carries `success`).
+            json_ok(preflight)
+            return
+        _render_preflight(preflight, title="Update preflight")
         if not preflight.get("success"):
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=EXIT_USAGE)
         return
 
     if not preflight.get("success"):
         if json_output:
-            print(json.dumps({"success": False, "preflight": preflight}, indent=2))
-        else:
-            _render_preflight(preflight, title="Update preflight")
-            console.print()
-            console.print(theme.error_panel(
-                "Update blocked by preflight issues",
-                title="Blocked",
-                hint="fix the ✗ items above, then re-run with --preflight-only",
-            ))
-        raise typer.Exit(code=1)
+            json_fail(
+                kind="validation",
+                message="Update blocked by preflight issues",
+                hint="fix the reported issues, then re-run with --preflight-only",
+                extra={"preflight": preflight},
+            )
+        _render_preflight(preflight, title="Update preflight")
+        console.print()
+        console.print(theme.error_panel(
+            "Update blocked by preflight issues",
+            title="Blocked",
+            hint="fix the ✗ items above, then re-run with --preflight-only",
+        ))
+        raise typer.Exit(code=EXIT_USAGE)
 
     agent = MDFAgent(root=None, manifest=manifest)
-    payload = agent.build_submission(test=False, update=True)
+    try:
+        payload = agent.build_submission(test=False, update=True)
+    except (RuntimeError, ValueError) as exc:
+        _abort_on_exception(
+            exc,
+            json_output=json_output,
+            title="Could not build the submission",
+            hint="fix the metadata, then re-run `mdf update`",
+            kind="validation",
+        )
 
     if dry_run:
         if json_output:
-            print(json.dumps({"success": True, "dry_run": True, "payload": payload, "preflight": preflight}, indent=2))
+            emit_json({"success": True, "dry_run": True, "payload": payload, "preflight": preflight})
             return
         _render_preflight(preflight, title="Update preflight")
         target = api_url or _api_url_for_service(resolved)
@@ -2362,18 +2825,15 @@ def update_alias(
                 on_file_done=transfer.on_file_done,
             )
     except RuntimeError as exc:
-        console.print()
-        console.print(theme.error_panel(
-            escape(str(exc)),
+        _abort_on_exception(
+            exc,
+            json_output=json_output,
             title="Upload failed",
             hint="check connectivity with `mdf config doctor`, then retry the update",
-        ))
-        raise typer.Exit(code=1)
+        )
 
     if json_output:
-        print(json.dumps(result, indent=2))
-        if not result.get("success"):
-            raise typer.Exit(code=1)
+        emit_json_result(result)
         return
 
     if result.get("success"):
@@ -2461,13 +2921,12 @@ def import_external(
         try:
             metadata = adapter.fetch_metadata(identifier)
         except Exception as exc:
-            console.print()
-            console.print(theme.error_panel(
-                escape(str(exc)),
+            _abort_on_exception(
+                exc,
+                json_output=json_output,
                 title="Failed to fetch metadata",
                 hint=f"confirm the record exists and is public on {adapter.name()}",
-            ))
-            raise typer.Exit(code=1)
+            )
 
     # Show metadata panel
     if not json_output:
@@ -2504,7 +2963,7 @@ def import_external(
 
     if dry_run:
         if json_output:
-            print(json.dumps({"success": True, "dry_run": True, "metadata": metadata}, indent=2))
+            emit_json({"success": True, "dry_run": True, "metadata": metadata})
         else:
             if metadata.get("file_urls"):
                 console.print()
@@ -2546,25 +3005,23 @@ def import_external(
                 on_file_done=download.on_file_done,
             )
     except Exception as exc:
-        console.print()
-        console.print(theme.error_panel(
-            escape(str(exc)),
+        _abort_on_exception(
+            exc,
+            json_output=json_output,
             title="Import failed",
             hint=f"retry, or download from {adapter.name()} manually and use `mdf publish`",
-        ))
-        raise typer.Exit(code=1)
+        )
 
     if not result.get("success"):
         if json_output:
-            print(json.dumps(result, indent=2))
-        else:
-            console.print()
-            console.print(theme.error_panel(
-                escape(str(result.get("error", "Unknown error"))),
-                title="Import failed",
-                hint=f"retry, or download from {adapter.name()} manually and use `mdf publish`",
-            ))
-        raise typer.Exit(code=1)
+            json_fail(result)
+        console.print()
+        console.print(theme.error_panel(
+            escape(str(result.get("error", "Unknown error"))),
+            title="Import failed",
+            hint=f"retry, or download from {adapter.name()} manually and use `mdf publish`",
+        ))
+        raise typer.Exit(code=EXIT_ERROR)
 
     # Now publish using the generated manifest (includes upload to MDF storage)
     manifest = result["manifest"]
@@ -2595,18 +3052,19 @@ def import_external(
                 on_file_done=upload.on_file_done,
             )
     except RuntimeError as exc:
-        console.print()
-        console.print(theme.error_panel(
-            escape(str(exc)),
+        _abort_on_exception(
+            exc,
+            json_output=json_output,
             title="Upload failed",
             hint="the download is kept — re-run `mdf publish --submit` from the output directory",
-        ))
-        raise typer.Exit(code=1)
+        )
 
     if json_output:
-        print(json.dumps({"import": result, "publish": pub_result}, indent=2))
-        if not pub_result.get("success"):
-            raise typer.Exit(code=1)
+        emit_json_result(
+            pub_result,
+            {"import": result, "publish": pub_result},
+            extra={"import": result, "publish": pub_result},
+        )
         return
 
     if pub_result.get("success"):

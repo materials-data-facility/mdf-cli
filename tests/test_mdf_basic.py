@@ -266,7 +266,9 @@ def test_resolve_globus_files_per_file_uris():
         "https://example.com/other.csv",  # should be skipped
         "stream://my-stream",  # should be skipped
     ]
-    result = _resolve_globus_files(sources, "fake-transfer-token")
+    resolved = _resolve_globus_files(sources, "fake-transfer-token")
+    result = resolved.files
+    assert resolved.https_sources == ["https://example.com/other.csv"]
     assert len(result) == 2
     assert result[0] == (
         "https://data.materialsdatafacility.org/mdf_open/my_dataset/subdir/file1.csv",
@@ -308,7 +310,7 @@ def test_resolve_globus_files_directory_uri(monkeypatch: pytest.MonkeyPatch):
     import globus_sdk
     monkeypatch.setattr(globus_sdk, "TransferClient", FakeTC)
 
-    result = _resolve_globus_files(sources, "fake-transfer-token")
+    result = _resolve_globus_files(sources, "fake-transfer-token").files
     assert len(result) == 2
     urls = [r[0] for r in result]
     rels = [r[1] for r in result]
@@ -426,6 +428,11 @@ def test_clone_with_zip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         _globus_data_token = "fake-data"
         _globus_transfer_token = "fake-transfer"
 
+        def __init__(self, *args, **kwargs):
+            # clone() now tries an anonymous client first (public datasets
+            # need no login), so the fake must accept BackendClient's kwargs.
+            pass
+
         @classmethod
         def authenticated(cls, **kw):
             return cls()
@@ -465,6 +472,11 @@ def test_clone_without_zip_https(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     class FakeBackendClient:
         _globus_data_token = "fake-data"
         _globus_transfer_token = "fake-transfer"
+
+        def __init__(self, *args, **kwargs):
+            # clone() now tries an anonymous client first (public datasets
+            # need no login), so the fake must accept BackendClient's kwargs.
+            pass
 
         @classmethod
         def authenticated(cls, **kw):
@@ -510,6 +522,11 @@ def test_clone_transfer_no_gcp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     class FakeBackendClient:
         _globus_data_token = "fake-data"
         _globus_transfer_token = "fake-transfer"
+
+        def __init__(self, *args, **kwargs):
+            # clone() now tries an anonymous client first (public datasets
+            # need no login), so the fake must accept BackendClient's kwargs.
+            pass
 
         @classmethod
         def authenticated(cls, **kw):

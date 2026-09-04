@@ -3,12 +3,33 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
 from mdf.core import config as core_config
+
+
+def _as_param_list(value: Any) -> List[str]:
+    """Normalize a filter option into a list of non-empty query-param values.
+
+    Accepts ``None``, a scalar (``"2024"``, ``2024``, ``2024.0``, ``True``), or
+    any iterable of those, so callers can pass a Typer repeatable option, a
+    single string, or a bare number from the Python SDK interchangeably —
+    ``client.search("perovskite", year=2024)`` must not raise.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes, int, float, bool)):
+        values = [value]
+    else:
+        try:
+            values = list(value)
+        except TypeError:
+            # Anything else that is not iterable is still one value.
+            values = [value]
+    return [str(item) for item in values if item is not None and str(item) != ""]
 
 _V2_API_URLS = {
     "prod": "https://api.materialsdatafacility.org",
@@ -205,9 +226,35 @@ class BackendClient:
         params = {"version": version} if version else None
         return self._request("GET", f"/status/{source_id}", params=params)
 
-    def submissions(self, organization: Optional[str] = None) -> Dict[str, Any]:
-        params = {"organization": organization} if organization else None
-        return self._request("GET", "/submissions", params=params)
+    def submissions(
+        self,
+        organization: Optional[str] = None,
+        *,
+        status: Optional[str] = None,
+        limit: Optional[int] = None,
+        start_key: Optional[str] = None,
+        include_counts: bool = False,
+    ) -> Dict[str, Any]:
+        """List the caller's submissions.
+
+        Filtering and paging happen server-side (``GET /submissions`` — see
+        connect_server ``aws/v2/FRONTEND_API.md``): ``status`` is a
+        comma-separated filter, ``limit`` is the page size, and ``start_key``
+        is the cursor echoed back as ``next_key`` on the previous page.
+        ``include_counts`` adds per-status ``counts`` plus an overall ``total``.
+        """
+        params: Dict[str, Any] = {}
+        if organization:
+            params["organization"] = organization
+        if status:
+            params["status"] = status
+        if limit is not None:
+            params["limit"] = int(limit)
+        if start_key:
+            params["start_key"] = start_key
+        if include_counts:
+            params["include_counts"] = "true"
+        return self._request("GET", "/submissions", params=params or None)
 
     def curation_pending(
         self,
@@ -546,20 +593,61 @@ class BackendClient:
             params["version"] = version
         return self._request("GET", f"/citation/{source_id}", params=params)
 
+    #: Facet filters accepted by ``GET /search``. Values must be whole facet
+    #: values as returned in the response's ``facets`` (the backend indexes
+    #: them as exact keywords, so a fragment matches nothing). Repeat a param
+    #: to OR several values together.
+    SEARCH_FILTERS = ("year", "organization", "author", "keyword", "domain")
+
+    #: Accepted ``sort`` values. Without a query, the backend always sorts by
+    #: ``newest`` — relevance has nothing to rank.
+    SEARCH_SORTS = ("relevance", "newest", "most_viewed")
+
     def search(
         self,
-        query: str,
+        query: Optional[str] = None,
         search_type: str = "all",
         limit: int = 20,
+        *,
+        offset: int = 0,
+        sort: Optional[str] = None,
+        year: Optional[Sequence[str]] = None,
+        organization: Optional[Sequence[str]] = None,
+        author: Optional[Sequence[str]] = None,
+        keyword: Optional[Sequence[str]] = None,
+        domain: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
-        """Search datasets and streams.
+        """Search datasets and streams, with facet filters and paging.
 
         Args:
-            query: Search query string
+            query: Search query string. ``None``/empty is a *browse* request —
+                the newest published datasets, same response shape.
             search_type: "all", "datasets", or "streams"
-            limit: Max results to return
+            limit: Page size
+            offset: Pagination offset
+            sort: One of :data:`SEARCH_SORTS`
+            year, organization, author, keyword, domain: Facet filters; each
+                takes a string or a sequence of strings (sent as repeated
+                query params, which the backend ORs together).
         """
-        params = {"q": query, "type": search_type, "limit": str(limit)}
+        params: Dict[str, Any] = {"type": search_type, "limit": str(limit)}
+        if query:
+            params["q"] = query
+        if offset:
+            params["offset"] = str(offset)
+        if sort:
+            params["sort"] = sort
+        for name, value in (
+            ("year", year),
+            ("organization", organization),
+            ("author", author),
+            ("keyword", keyword),
+            ("domain", domain),
+        ):
+            values = _as_param_list(value)
+            if values:
+                # httpx encodes a list as repeated params: ?author=A&author=B
+                params[name] = values if len(values) > 1 else values[0]
         return self._request("GET", "/search", params=params)
 
     def search_semantic(self, query: str, limit: int = 20) -> Dict[str, Any]:
@@ -789,7 +877,19 @@ class BackendClient:
                     continue
                 return ApiResult({"success": False, "error": f"Connection failed after {self._MAX_RETRIES + 1} attempts: {exc}"})
             except httpx.ConnectTimeout as exc:
+                # Same fast-fail as ConnectError: prod has no API yet, so
+                # retrying a connect timeout only makes the user wait
+                # 1 + 2 + 4 seconds for the same certain failure.
                 last_exc = exc
+                if self.base_url == _V2_API_URLS["prod"]:
+                    return ApiResult({
+                        "success": False,
+                        "error": (
+                            f"Cannot connect to the production MDF API at {self.base_url}. "
+                            "The production service is not available yet; set "
+                            "MDF_SERVICE=staging and retry."
+                        ),
+                    })
                 if attempt < self._MAX_RETRIES:
                     time.sleep(2 ** attempt)
                     continue
