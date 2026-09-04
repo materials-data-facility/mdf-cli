@@ -263,6 +263,11 @@ def classify_api_error(result: Any) -> Dict[str, Optional[str]]:
     the raw server text (unescaped).
     """
     status = status_code_of(result)
+    if status is not None and 200 <= status < 300:
+        # A 2xx carrying {"success": false} (e.g. GET /status on a hidden or
+        # missing record) says nothing about the failure kind; classify from
+        # the text and do not report a misleading "code": 200.
+        status = None
     raw_error = "Unknown error"
     if isinstance(result, dict):
         raw_error = result.get("error") or result.get("detail") or "Unknown error"
@@ -512,7 +517,13 @@ def error_envelope(
             resolved_hint = info["hint"]
         elif resolved_kind in _ERROR_KINDS:
             resolved_hint = _ERROR_KINDS[resolved_kind][1]
-    resolved_code = code if code is not None else status_code_of(result)
+    if code is not None:
+        resolved_code = code
+    else:
+        status = status_code_of(result)
+        # A 2xx that carried {"success": false} says nothing about the failure;
+        # report null, never a misleading "code": 200. Other statuses stay ints.
+        resolved_code = None if (status is not None and 200 <= status < 300) else status
 
     error: Dict[str, Any] = {
         "kind": resolved_kind,
