@@ -134,3 +134,119 @@ def init_manifest(
     )
     save_manifest(config, path)
     return config
+
+
+# ---------------------------------------------------------------------------
+# Updates: previous metadata -> manifest, and the source_id write-back
+# ---------------------------------------------------------------------------
+
+#: Flat v2 metadata key -> ManifestConfig field, for the fields a new version
+#: inherits. The reverse of ManifestConfig.to_metadata_payload. Server-managed
+#: keys (version, latest, doi, data_sources, download_url, acl, ...) are
+#: deliberately absent: the server carries them forward itself.
+_INHERITED_METADATA_FIELDS: Dict[str, str] = {
+    "title": "title",
+    "authors": "authors",
+    "description": "description",
+    "publisher": "publisher",
+    "publication_year": "publication_year",
+    "resource_type": "resource_type",
+    "keywords": "subjects",
+    "organization": "organization",
+    "tags": "tags",
+    "domains": "domains",
+    "license": "license",
+    "funding": "funding",
+    "related_works": "related_works",
+    "methods": "methods",
+    "facility": "facility",
+    "fields_of_science": "fields_of_science",
+    "ml": "ml",
+    "geo_locations": "geo_locations",
+    "data_type": "data_type",
+    "formats": "formats",
+    "external_doi": "external_doi",
+    "external_url": "external_url",
+    "external_source": "external_source",
+}
+
+
+def _is_blank(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def manifest_from_metadata(metadata: Dict[str, Any]) -> ManifestConfig:
+    """Build a manifest from a published record's flat v2 metadata.
+
+    Used by ``mdf publish --update``: the previous version's full metadata
+    (``dataset_mdata`` from ``GET /status/{source_id}``) becomes the base that
+    the user's changes are laid over, so a new version keeps its description,
+    keywords, license, funding and related works.
+    """
+    fields: Dict[str, Any] = {}
+    for key, field in _INHERITED_METADATA_FIELDS.items():
+        value = metadata.get(key)
+        if not _is_blank(value):
+            fields[field] = value
+
+    # The server folds external_* into one `external` object.
+    external = metadata.get("external")
+    if isinstance(external, dict):
+        for key in ("doi", "url", "source"):
+            if external.get(key) and "external_" + key not in fields:
+                fields["external_" + key] = external[key]
+
+    # User extensions survive; reserved `mdf_*` keys (identity) never do.
+    extensions = metadata.get("extensions")
+    if isinstance(extensions, dict):
+        custom = {k: v for k, v in extensions.items() if not str(k).startswith("mdf_")}
+        if custom:
+            fields["custom"] = custom
+
+    if isinstance(fields.get("authors"), list):
+        fields["authors"] = _normalize_authors(fields["authors"])
+    return ManifestConfig(**fields)
+
+
+def merge_manifests(base: ManifestConfig, overrides: ManifestConfig) -> ManifestConfig:
+    """Lay ``overrides`` over ``base``: every non-blank override field wins."""
+    merged = base.model_dump(exclude_none=True)
+    for key, value in overrides.model_dump(exclude_none=True).items():
+        if not _is_blank(value):
+            merged[key] = value
+    if isinstance(merged.get("authors"), list):
+        merged["authors"] = _normalize_authors(merged["authors"])
+    if isinstance(merged.get("data_sources"), list):
+        merged["data_sources"] = _normalize_data_sources(merged["data_sources"])
+    return ManifestConfig(**merged)
+
+
+def write_source_id(path: Path, source_id: str) -> bool:
+    """Record ``source_id`` in an existing mdf.yaml without rewriting the rest.
+
+    Appends one ``source_id:`` line, so comments and formatting survive, then
+    re-reads the file to prove it still parses to the same manifest plus the
+    id; otherwise the original text is restored. Returns True when written,
+    False when the file already names a source_id or could not be updated.
+    """
+    original = path.read_text(encoding="utf-8")
+    data = yaml.safe_load(original) or {}
+    if not isinstance(data, dict) or data.get("source_id"):
+        return False
+    separator = "" if original.endswith("\n") or not original else "\n"
+    path.write_text(
+        f"{original}{separator}"
+        "# Set by `mdf publish`; `mdf publish --update` adds a version to this dataset.\n"
+        + yaml.safe_dump({"source_id": source_id}),
+        encoding="utf-8",
+    )
+    try:
+        written = yaml.safe_load(path.read_text(encoding="utf-8"))
+        ok = isinstance(written, dict) and written.get("source_id") == source_id and all(
+            written.get(key) == value for key, value in data.items()
+        )
+    except yaml.YAMLError:
+        ok = False
+    if not ok:
+        path.write_text(original, encoding="utf-8")
+    return ok

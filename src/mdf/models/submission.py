@@ -6,6 +6,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class Submission(BaseModel):
+    # Dataset identity (top-level, v2.1 contract): which dataset an update
+    # adds a version to. Never sent via extensions.mdf_source_id (deprecated).
+    source_id: Optional[str] = None
+
     # v2 flat metadata fields
     title: Optional[str] = None
     authors: Optional[List[Dict[str, Any]]] = None
@@ -66,6 +70,9 @@ class Submission(BaseModel):
     def to_payload(self) -> Dict[str, Any]:
         """Build the flat v2 payload for submission."""
         payload: Dict[str, Any] = {}
+
+        if self.source_id:
+            payload["source_id"] = self.source_id
 
         # Required fields
         if self.title:

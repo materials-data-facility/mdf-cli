@@ -71,12 +71,17 @@ def _launch_command() -> Tuple[str, List[str]]:
 
 
 def _server_env(service: Optional[str], api_url: Optional[str]) -> Dict[str, str]:
-    """Pin the service in the snippet, so the client is not at the mercy of config drift."""
+    """Pin a service in the snippet only when the user asked for one.
+
+    Without ``--service``/``--api-url`` the snippet carries no ``MDF_SERVICE``,
+    so the server follows the CLI's own default — and follows it when the
+    release default moves from staging to prod, instead of staying pinned.
+    """
     if api_url:
         return {"MDF_API_URL": api_url}
-    from mdf.core.config import resolve_service
-
-    return {"MDF_SERVICE": resolve_service(service)}
+    if service:
+        return {"MDF_SERVICE": service}
+    return {}
 
 
 def config_snippet(
@@ -86,12 +91,13 @@ def config_snippet(
 ) -> Dict[str, Any]:
     """Build the ``{"mcpServers": {...}}`` config object for ``client``."""
     command, args = _launch_command()
+    env = _server_env(service, api_url)
     return {
         "mcpServers": {
             SERVER_KEY: {
                 "command": command,
                 "args": args,
-                "env": _server_env(service, api_url),
+                **({"env": env} if env else {}),
             }
         }
     }

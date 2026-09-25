@@ -20,8 +20,8 @@ Examples:
 
 from __future__ import annotations
 
+import logging
 import os
-import sys
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -36,6 +36,10 @@ from mdf.core.validation import validate_manifest
 from mdf.core.backend_client import BackendClient, _api_url_for_service
 from mdf.extractors.registry import discover_metadata
 from mdf.models.config import Author, ManifestConfig
+
+#: Core never prints: warnings go through logging (Python's last-resort handler
+#: still shows WARNING and above on stderr when the caller configured nothing).
+logger = logging.getLogger(__name__)
 
 
 _MDF_HTTPS_BASE = "https://data.materialsdatafacility.org"
@@ -184,9 +188,8 @@ def _resolve_upload_tls_verify() -> bool | str:
     if normalized in ("false", "0", "no"):
         global _INSECURE_SSL_WARNING_EMITTED
         if not _INSECURE_SSL_WARNING_EMITTED:
-            print(
-                "Warning: MDF_SSL_VERIFY=false disables TLS certificate verification for MDF uploads.",
-                file=sys.stderr,
+            logger.warning(
+                "Warning: MDF_SSL_VERIFY=false disables TLS certificate verification for MDF uploads."
             )
             _INSECURE_SSL_WARNING_EMITTED = True
         return False
@@ -251,10 +254,10 @@ def _create_zip_archive(
         return None
 
     if total_size > _ZIP_MAX_TOTAL_BYTES:
-        print(
-            f"Warning: Skipping zip archive — total size ({total_size / (1024**3):.1f} GB) "
-            f"exceeds {_ZIP_MAX_TOTAL_BYTES / (1024**3):.0f} GB limit.",
-            file=sys.stderr,
+        logger.warning(
+            "Warning: Skipping zip archive — total size (%.1f GB) exceeds %.0f GB limit.",
+            total_size / (1024**3),
+            _ZIP_MAX_TOTAL_BYTES / (1024**3),
         )
         return None
 
@@ -604,10 +607,9 @@ def _resolve_globus_files(
         path = rest[slash_idx:]
 
         if endpoint_id.lower() != _NCSA_MDF_COLLECTION_UUID:
-            print(
-                f"Warning: Skipping non-NCSA source {source} — "
-                f"use --transfer for cross-endpoint downloads.",
-                file=sys.stderr,
+            logger.warning(
+                "Warning: Skipping non-NCSA source %s — use --transfer for cross-endpoint downloads.",
+                source,
             )
             continue
 
@@ -642,7 +644,7 @@ def _ls_recursive(
     try:
         listing = tc.operation_ls(endpoint_id, path=dir_path)
     except Exception as exc:
-        print(f"Warning: Failed to list {dir_path}: {exc}", file=sys.stderr)
+        logger.warning("Warning: Failed to list %s: %s", dir_path, exc)
         return
 
     for entry in listing:
@@ -1291,10 +1293,9 @@ class MDFAgent:
                     # or a cleartext http:// URL, which we refuse).
                     # Don't hand it to httpx (which raises UnsupportedProtocol) —
                     # fall back to the file-by-file HTTPS path below.
-                    print(
-                        "Note: dataset archive is not HTTPS-downloadable — "
-                        "falling back to file-by-file HTTPS download.",
-                        file=sys.stderr,
+                    logger.info(
+                        "Dataset archive is not HTTPS-downloadable — "
+                        "falling back to file-by-file HTTPS download."
                     )
                     if stage_callback:
                         stage_callback("falling_back_to_https", plan)
@@ -1313,10 +1314,9 @@ class MDFAgent:
                         result["resolved_source_id"] = plan["resolved_source_id"]
                         return result
                     except zipfile.BadZipFile:
-                        print(
-                            "Note: download_url did not return a zip archive — "
-                            "falling back to file-by-file HTTPS download.",
-                            file=sys.stderr,
+                        logger.info(
+                            "download_url did not return a zip archive — "
+                            "falling back to file-by-file HTTPS download."
                         )
                         if stage_callback:
                             stage_callback("falling_back_to_https", plan)

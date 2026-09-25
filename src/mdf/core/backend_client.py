@@ -113,6 +113,7 @@ class BackendClient:
         token: Optional[str] = None,
         service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
+        interactive: Optional[bool] = None,
     ) -> "BackendClient":
         """Create an authenticated backend client.
 
@@ -121,7 +122,14 @@ class BackendClient:
         2. MDF_CONNECT_TOKEN env var
         3. MDF_CLIENT_ID + MDF_CLIENT_SECRET env vars (confidential client flow)
         4. dev_user_id / MDF_DEV_USER_ID env var (X-User-Id)
-        5. Interactive Globus OAuth2 login
+        5. A token saved by ``mdf login --token T --save``
+        6. Cached Globus login, or an interactive Globus OAuth2 login
+
+        ``interactive`` controls step 6 when no cached login exists: ``True``
+        prompts (on stderr), ``False`` raises
+        :class:`mdf.core.exceptions.AuthRequired`, and ``None`` (default)
+        follows :func:`mdf.auth.globus.interactive_login`, which prompts unless
+        a caller such as the CLI narrowed it.
         """
         resolved_service = core_config.resolve_service(service_instance)
         url = base_url or _api_url_for_service(resolved_service)
@@ -177,12 +185,17 @@ class BackendClient:
             # Local dev backends commonly run in AUTH_MODE=dev and can derive a default user.
             return cls(base_url=url)
 
+        saved_token = core_config.load_saved_token()
+        if saved_token:
+            return cls(base_url=url, token=saved_token)
+
         # Lazy import so token/dev-user workflows do not require globus_sdk.
         from mdf.auth.globus import get_authorizer_for_scopes, get_scopes_for_service, DATA_MDF_SCOPE, TRANSFER_SCOPE, GROUPS_SCOPE, NCSA_MDF_COLLECTION_UUID
 
         scope, _resource_server = get_scopes_for_service(resolved_service)
         authorizers = get_authorizer_for_scopes(
             [scope, DATA_MDF_SCOPE, TRANSFER_SCOPE, GROUPS_SCOPE],
+            interactive=interactive,
         )
 
         bearer_prefix = "Bearer "

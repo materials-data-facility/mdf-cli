@@ -33,6 +33,12 @@ class DerivedFrom(BaseModel):
 
 
 class ManifestConfig(BaseModel):
+    # Dataset identity. Unset until the first publish, which writes the
+    # server-assigned id back to mdf.yaml; `mdf publish --update` then uses it
+    # to add a version to the same dataset. Sent as the top-level `source_id`
+    # submission field on updates only.
+    source_id: Optional[str] = None
+
     title: Optional[Union[str, List[str]]] = None
     authors: Optional[List[Union[str, Author]]] = None
     description: Optional[str] = None

@@ -1,0 +1,39 @@
+
+ Usage: root [OPTIONS] COMMAND [ARGS]...
+
+ MDF Agent — Materials Data Facility
+
+   Options
+  --version             -V        Show version and exit
+  --install-completion            Install completion for the current shell.
+  --show-completion               Show completion for the current shell, to copy it or customize
+                                  the installation.
+  --help                          Show this message and exit.
+
+   Commands
+  mcp      Model Context Protocol server for AI assistants
+
+   Auth & Setup
+  setup    Configure defaults and create a manifest.
+  login    Authenticate with Globus.
+  logout   Clear cached credentials.
+  status   Check submission or auth status.
+
+   Publish & Download
+  publish  Publish a dataset to MDF Connect.
+  clone    Download a dataset from MDF.
+  import   Import a dataset from an external repository or a DataCite DOI.
+
+   Explore
+  search   Search public datasets and streams.
+  list     List your submitted datasets.
+  related  List datasets related to a given dataset.
+  show     Show dataset details.
+
+   More
+  dataset  Dataset utilities (cite, open, preview, versions, ...)
+  admin    Curation and admin commands
+  config   Manage configuration
+  skill    Install the packaged MDF agent skills (Claude, Codex, Gemini)
+
+

@@ -137,3 +137,48 @@ def resolve_service(explicit: Optional[str]) -> str:
         return environment
     cfg = GlobalConfig()
     return cfg.service or DEFAULT_SERVICE
+
+
+# ---------------------------------------------------------------------------
+# Saved access token (`mdf login --token T --save`)
+# ---------------------------------------------------------------------------
+
+
+def saved_token_path() -> Path:
+    """Where ``mdf login --token --save`` keeps a raw access token (mode 0600).
+
+    Deliberately separate from ``config.json`` (which ``mdf config show``
+    prints) and from the Globus token store (``tokens.json``, owned by
+    globus_sdk and keyed by resource server).
+    """
+    return _default_config_path().parent / "access_token"
+
+
+def load_saved_token() -> Optional[str]:
+    """The saved access token, or None when there is none (or it is unreadable)."""
+    path = saved_token_path()
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return token or None
+
+
+def save_token(token: str) -> Path:
+    """Persist ``token`` for later CLI/SDK calls, readable by the owner only."""
+    path = saved_token_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(token.strip() + "\n")
+    os.chmod(path, 0o600)
+    return path
+
+
+def clear_saved_token() -> bool:
+    """Delete the saved access token. Returns True if one existed."""
+    path = saved_token_path()
+    if path.exists():
+        path.unlink()
+        return True
+    return False

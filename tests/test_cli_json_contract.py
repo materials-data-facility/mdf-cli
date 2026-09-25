@@ -184,8 +184,9 @@ class TestJsonFailurePathsExitNonZero:
         assert result.exit_code == EXIT_OK
         payload = envelope_of(result)
         assert payload["success"] is True
-        # Existing shape preserved: the card still lives under "card".
-        assert payload["card"]["card"]["source_id"] == "x"
+        # Flat shape: the card lives under "card" exactly once (CLI-U1).
+        assert payload["card"]["source_id"] == "x"
+        assert "card" not in payload["card"]
 
     def test_status_auth_failure(self, monkeypatch):
         patch_auth(monkeypatch, UNAUTHORIZED)

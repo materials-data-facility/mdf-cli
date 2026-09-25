@@ -10,7 +10,7 @@ from rich.markup import escape
 from mdf.core.backend_client import BackendClient
 from mdf.core.config import resolve_service
 from mdf.cli import theme
-from mdf.cli.formatting import format_result_or_json, format_status_badge, handle_api_result
+from mdf.cli.formatting import format_authors, format_result_or_json, format_status_badge, handle_api_result
 from mdf.cli.theme import console
 
 app = typer.Typer(help="Interact with MDF backend (v2) API")
@@ -403,7 +403,7 @@ def search(
             if item.get("type") == "dataset":
                 typer.echo(f"  {i}. [DATASET] {item.get('title', 'Untitled')}")
                 typer.echo(f"     source_id: {item.get('source_id')} v{item.get('version')}")
-                typer.echo(f"     status: {item.get('status')} | authors: {', '.join(item.get('authors', []))}")
+                typer.echo(f"     status: {item.get('status')} | authors: {format_authors(item.get('authors'))}")
             else:
                 typer.echo(f"  {i}. [STREAM] {item.get('title', 'Untitled')}")
                 typer.echo(f"     stream_id: {item.get('stream_id')}")
@@ -443,7 +443,7 @@ def card(
     table = theme.detail_table()
 
     if c.get("authors"):
-        table.add_row("Authors", escape(", ".join(c["authors"])))
+        table.add_row("Authors", escape(format_authors(c["authors"])))
     if c.get("publisher"):
         table.add_row("Publisher", escape(str(c["publisher"])))
     if c.get("publication_year"):

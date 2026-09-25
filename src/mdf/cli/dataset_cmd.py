@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import webbrowser
+from pathlib import Path
 from typing import List, Optional
 
 import typer
@@ -17,6 +18,7 @@ from mdf.cli.formatting import (
     api_spinner,
     confirm_or_abort,
     console,
+    err_console,
     emit_json_result,
     format_status_badge,
     interactive_stdin,
@@ -78,10 +80,22 @@ def _copy_to_clipboard(text: str) -> None:
         pass
 
 
+#: ``--format`` value -> panel title. The keys are also the backend's format names.
+CITATION_FORMATS = {
+    "apa": "APA Citation",
+    "bibtex": "BibTeX",
+    "ris": "RIS",
+    "datacite": "DataCite XML",
+}
+
+
 @app.command()
 def cite(
     source_id: str = typer.Argument(..., help="Dataset source ID"),
-    format: str = typer.Option("apa", "--format", "-f", help="Citation format: bibtex, ris, apa, datacite"),
+    format: str = typer.Option("apa", "--format", "-f", help="Citation format: apa, bibtex, ris, datacite"),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o", help="Write the citation text to FILE instead of stdout"
+    ),
     copy: bool = typer.Option(False, "--copy", help="Copy citation to clipboard"),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Dataset version"),
     json_output: bool = typer.Option(False, "--json", help="JSON output"),
@@ -92,11 +106,24 @@ def cite(
 ):
     """Get citation for a dataset.
 
+    On a terminal the citation is shown in a panel; piped or redirected, stdout
+    carries the citation text only.
+
     Examples:
         mdf dataset cite my_dataset                       # APA format
-        mdf dataset cite my_dataset -f bibtex             # BibTeX for papers
+        mdf dataset cite my_dataset -f bibtex -o ref.bib  # BibTeX file for papers
+        mdf dataset cite my_dataset -f bibtex >> refs.bib # plain text when redirected
         mdf dataset cite my_dataset --copy                # Copy to clipboard
     """
+    format = (format or "").strip().lower()
+    if format not in CITATION_FORMATS:
+        message = f"Unknown citation format: {format!r}"
+        hint = f"choose one of: {', '.join(CITATION_FORMATS)}"
+        if json_output:
+            json_fail(kind="validation", message=message, hint=hint)
+        console.print(theme.error_panel(escape(message), title="Invalid --format", hint=hint))
+        raise typer.Exit(code=EXIT_USAGE)
+
     resolved = resolve_service(service)
     client = read_client(
         api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output
@@ -113,25 +140,30 @@ def cite(
     if not is_success(result):
         require_success(result, error_prefix="Citation failed")
 
-    citation_text = result.get(format) or result.get("apa", "")
+    citation_text = str(result.get(format) or result.get("apa") or "")
 
     if copy:
         _copy_to_clipboard(citation_text)
 
+    if output is not None:
+        output.write_text(citation_text.rstrip("\n") + "\n", encoding="utf-8")
+        err_console.print(
+            theme.mark("ok", f"Wrote {CITATION_FORMATS[format]} to {escape(str(output))}", style="ok")
+        )
+        return
+
+    if not console.is_terminal:
+        # Piped or redirected: the citation text only — no panel, no wrapping.
+        print(citation_text.rstrip("\n"))
+        return
+
     # Structured citation formats get their lexer; APA is prose.
     lexers = {"bibtex": "bibtex", "ris": "text", "datacite": "xml"}
-    titles = {
-        "bibtex": "BibTeX",
-        "ris": "RIS",
-        "datacite": "DataCite XML",
-        "apa": "APA Citation",
-    }
-    title = titles.get(format, "APA Citation")
     lexer = lexers.get(format)
     body = theme.syntax(citation_text, lexer, word_wrap=True) if lexer else escape(citation_text)
 
     console.print()
-    console.print(theme.panel(body, title=title, subtitle=source_id))
+    console.print(theme.panel(body, title=CITATION_FORMATS[format], subtitle=source_id))
     console.print()
 
 

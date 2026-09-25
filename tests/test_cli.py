@@ -431,7 +431,8 @@ class TestAuthCommands:
         assert "invalid token" in result.stdout
         assert "Authentication ready" not in result.stdout
 
-    def test_logout_reports_success(self, monkeypatch):
+    def test_logout_reports_success(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setattr("mdf.auth.globus.logout", lambda: True)
         result = runner.invoke(app, ["logout"])
         assert result.exit_code == 0
@@ -455,6 +456,91 @@ class TestAuthCommands:
         assert "authenticated" in result.stdout
         assert "MDF_CONNECT_TOKEN is set in environment" in result.stdout
 
+    # CLI-U10 / C6 -------------------------------------------------------
+
+    @staticmethod
+    def _auth_check_ok(monkeypatch, payload):
+        class FakeResponse:
+            status_code = 200
+            headers = {}
+            text = ""
+
+            def json(self):
+                return payload
+
+        monkeypatch.setattr(
+            "httpx.Client.request", lambda self, method, url, **kwargs: FakeResponse()
+        )
+
+    def test_login_token_shows_identity_and_is_not_saved_by_default(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        self._auth_check_ok(
+            monkeypatch, {"success": True, "name": "Jane Doe", "email": "jane@example.org"}
+        )
+        result = runner.invoke(app, ["login", "--service", "staging", "--token", "tok-1"])
+        assert result.exit_code == 0, result.stdout
+        assert "Jane Doe <jane@example.org>" in result.stdout
+        assert "staging" in result.stdout
+        from mdf.core.config import saved_token_path
+
+        assert not saved_token_path().exists()
+
+    def test_login_token_save_persists_owner_only(self, monkeypatch, tmp_path):
+        import stat
+
+        from mdf.core.backend_client import BackendClient
+        from mdf.core.config import saved_token_path
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("MDF_CONNECT_TOKEN", raising=False)
+        monkeypatch.delenv("MDF_CLIENT_ID", raising=False)
+        monkeypatch.delenv("MDF_DEV_USER_ID", raising=False)
+        self._auth_check_ok(monkeypatch, {"success": True, "name": "Jane Doe"})
+        result = runner.invoke(app, ["login", "--token", "tok-2", "--save"])
+        assert result.exit_code == 0, result.stdout
+        path = saved_token_path()
+        assert path.read_text().strip() == "tok-2"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        # Later commands pick it up without a Globus login...
+        assert BackendClient.authenticated(service_instance="staging")._token == "tok-2"
+        status = runner.invoke(app, ["status", "--auth", "--json"])
+        assert json.loads(status.stdout)["method"] == "saved token (mdf login --token --save)"
+        # ...and logout removes it, printing one message.
+        monkeypatch.setattr("mdf.auth.globus.logout", lambda: False)
+        out = runner.invoke(app, ["logout"])
+        assert out.exit_code == 0
+        assert out.stdout.count("Logged out") == 1
+        assert not path.exists()
+
+    def test_login_save_without_token_is_a_usage_error(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        result = runner.invoke(app, ["login", "--save"])
+        assert result.exit_code == 2
+
+    def test_login_without_a_terminal_does_not_prompt(self, monkeypatch, tmp_path):
+        """CliRunner stdin is not a TTY: interactive login must fail fast (exit 4)."""
+        from mdf.core.exceptions import AuthRequired
+
+        def fake_get_authorizer_for_scopes(scopes, no_browser=False, interactive=None):
+            assert interactive is False
+            raise AuthRequired()
+
+        monkeypatch.setattr("mdf.auth.globus.get_authorizer_for_scopes", fake_get_authorizer_for_scopes)
+        result = runner.invoke(app, ["login"])
+        assert result.exit_code == 4
+        assert "needs a terminal" in result.stdout
+
+    def test_status_auth_reports_identity(self, monkeypatch):
+        monkeypatch.setenv("MDF_CONNECT_TOKEN", "env-token")
+        monkeypatch.setattr(
+            "mdf.cli.main._fetch_identity",
+            lambda **kwargs: {"name": "Jane Doe", "email": "jane@example.org"},
+        )
+        human = runner.invoke(app, ["status", "--auth", "--service", "staging"])
+        assert "Jane Doe <jane@example.org>" in human.stdout
+        payload = json.loads(runner.invoke(app, ["status", "--auth", "--json"]).stdout)
+        assert payload["name"] == "Jane Doe" and payload["email"] == "jane@example.org"
+
 
 class TestSetupAndManifestUX:
     def test_setup_writes_config_without_creating_manifest(self, monkeypatch):
@@ -467,14 +553,15 @@ class TestSetupAndManifestUX:
             result = runner.invoke(
                 app,
                 ["setup", str(dataset)],
-                input="staging\nMy Org\nMy Publisher\n\nn\n",
+                input="My Org\nMy Publisher\n\nn\n",
             )
 
             assert result.exit_code == 0
             config_path = home / ".config" / "mdf" / "config.json"
             assert config_path.exists()
             config = json.loads(config_path.read_text())
-            assert config["defaults"]["service"] == "staging"
+            # CLI-U10: setup never pins the service; the release default applies.
+            assert "service" not in config.get("defaults", {})
             assert config["user"]["organization"] == "My Org"
             assert config["user"]["publisher"] == "My Publisher"
             assert not (dataset / "mdf.yaml").exists()
@@ -490,7 +577,6 @@ class TestSetupAndManifestUX:
                 app,
                 ["setup", str(dataset)],
                 input=(
-                    "staging\n"
                     "My Org\n"
                     "My Publisher\n"
                     "me@example.org\n"

@@ -159,8 +159,10 @@ def build_submission(
 
     data_sources = resolve_data_sources(manifest.data_sources, root)
 
-    # Auto-populate data_sources from directory scan if empty
-    if not data_sources and root and root.is_dir():
+    # Auto-populate data_sources from directory scan if empty. Not for an
+    # update: there, no data sources means a metadata-only update and the
+    # server keeps the previous version's files.
+    if not data_sources and not update and root and root.is_dir():
         scanned = [
             str(f.resolve())
             for f in sorted(root.rglob("*"))
@@ -171,6 +173,8 @@ def build_submission(
             data_sources = scanned
 
     submission = Submission(
+        # Identity only matters to (and is only sent for) an update.
+        source_id=manifest.source_id if update else None,
         title=metadata.get("title"),
         authors=metadata.get("authors"),
         description=metadata.get("description"),

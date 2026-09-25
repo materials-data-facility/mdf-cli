@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from mdf.auth.globus import is_logged_in
 from mdf.core.agent import _extract_doi, _resolve_doi
 from mdf.core.backend_client import BackendClient
-from mdf.core.config import resolve_service
+from mdf.core.config import load_saved_token, resolve_service
 from mdf.core.validation import validate_manifest
 from mdf.models.config import DataSource, ManifestConfig
 
@@ -78,6 +78,8 @@ def auth_ready(service: str, token: Optional[str] = None, dev_user: Optional[str
     if dev_user or os.environ.get("MDF_DEV_USER_ID"):
         return True
     if os.environ.get("MDF_CLIENT_ID") and os.environ.get("MDF_CLIENT_SECRET"):
+        return True
+    if load_saved_token():
         return True
     return is_logged_in(service_instance=normalized)
 
@@ -222,6 +224,12 @@ def run_preflight(
             total_files += int(info["file_count"] or 0)
             total_bytes += int(info["total_bytes"] or 0)
             inspected_sources.append(info)
+    elif manifest.update_metadata_only:
+        _add_issue(
+            issues,
+            "info",
+            "No data sources: metadata-only update; the new version keeps the previous version's files.",
+        )
     elif has_visible_root_files:
         auto_files = list(_iter_visible_files(root))
         total_files = len(auto_files)

@@ -214,3 +214,69 @@ def test_interactive_login_requests_groups_and_sends_the_header(monkeypatch):
     client._client = recorder  # type: ignore[assignment]
     client.curation_pending()
     assert recorder.last_headers["X-Groups-Token"] == "tok-groups.api.globus.org"
+
+
+# ---------------------------------------------------------------------------
+# C2 — core never prompts unless allowed
+# ---------------------------------------------------------------------------
+
+
+class _LoginNeededUserApp(_FakeUserApp):
+    login_calls = 0
+
+    def login_required(self):
+        return True
+
+    def login(self):
+        _LoginNeededUserApp.login_calls += 1
+        print("Please authenticate with Globus here:")  # what globus_sdk prints
+
+
+def _no_cached_login(monkeypatch):
+    from mdf.auth import globus as globus_auth
+
+    for name in ("MDF_CONNECT_TOKEN", "MDF_DEV_USER_ID", "MDF_CLIENT_ID", "MDF_CLIENT_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    _LoginNeededUserApp.login_calls = 0
+    monkeypatch.setattr(globus_auth, "UserApp", _LoginNeededUserApp)
+    monkeypatch.setattr(globus_auth, "JSONTokenStorage", lambda path: SimpleNamespace())
+    monkeypatch.setattr(globus_auth, "GlobusAppConfig", lambda **kwargs: SimpleNamespace())
+
+
+def test_authenticated_non_interactive_raises_auth_required(monkeypatch, capsys):
+    import pytest
+
+    from mdf.core.exceptions import AuthRequired
+
+    _no_cached_login(monkeypatch)
+    with pytest.raises(AuthRequired):
+        BackendClient.authenticated(
+            base_url="https://example.org", service_instance="staging", interactive=False
+        )
+    captured = capsys.readouterr()
+    assert _LoginNeededUserApp.login_calls == 0
+    assert captured.out == "" and captured.err == ""
+
+
+def test_interactive_login_scope_narrows_the_default(monkeypatch):
+    import pytest
+
+    from mdf.auth.globus import interactive_login
+    from mdf.core.exceptions import AuthRequired
+
+    _no_cached_login(monkeypatch)
+    with interactive_login(False):
+        with pytest.raises(AuthRequired):
+            BackendClient.authenticated(base_url="https://example.org", service_instance="staging")
+    assert _LoginNeededUserApp.login_calls == 0
+
+
+def test_sdk_default_still_prompts_on_stderr(monkeypatch, capsys):
+    """Foundry relies on the SDK prompting by default; the prompt must not touch stdout."""
+    _no_cached_login(monkeypatch)
+    BackendClient.authenticated(base_url="https://example.org", service_instance="staging")
+    captured = capsys.readouterr()
+    assert _LoginNeededUserApp.login_calls == 1
+    assert captured.out == ""
+    assert "Visit this URL" in captured.err
+    assert "Please authenticate with Globus here:" in captured.err

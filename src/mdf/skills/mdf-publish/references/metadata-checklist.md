@@ -254,8 +254,9 @@ publication via the metadata-edit path (a minor version bump); `resource_type` i
 
 ### `update_metadata_only: true`
 Metadata-only resubmission — no data upload. Required for enrichment mode (SKILL.md
-Stage 7) and it relaxes the `data_sources` requirement. Any update also needs
-`custom.mdf_source_id: "<source_id>"` — the server resolves the update target from it.
+Stage 7) and it relaxes the `data_sources` requirement. An update names its dataset
+with a top-level `source_id: "<source_id>"` in `mdf.yaml` (or `mdf publish --update
+<source_id>`); never `custom.mdf_source_id`, which is deprecated.
 
 ### `acl:`
 Access control. Default is public. Only set this if the user explicitly asks for

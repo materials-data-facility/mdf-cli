@@ -52,6 +52,46 @@ def format_status_badge(status: str) -> str:
     return theme.state_badge(status)
 
 
+def author_name(author: Any) -> str:
+    """One author as display text.
+
+    The API has served authors as bare strings and as objects
+    (``{"name", "given_name", "family_name", "affiliations", ...}``), and
+    manifests hold :class:`mdf.models.config.Author` models; all three render
+    the same way. An object without ``name`` falls back to "Family, Given".
+    """
+    if author is None:
+        return ""
+    if isinstance(author, str):
+        return author.strip()
+    if not isinstance(author, dict):
+        if hasattr(author, "model_dump"):
+            author = author.model_dump()
+        else:
+            return str(author).strip()
+    name = str(author.get("name") or "").strip()
+    if name:
+        return name
+    given = str(author.get("given_name") or "").strip()
+    family = str(author.get("family_name") or "").strip()
+    if family and given:
+        return f"{family}, {given}"
+    return family or given
+
+
+def format_authors(authors: Any, sep: str = "; ") -> str:
+    """Join a list of authors (strings, dicts or Author models) for display.
+
+    The default separator is ``"; "`` because names arrive as "Family, Given",
+    so a comma would be ambiguous. Blank entries are dropped.
+    """
+    if authors is None:
+        return ""
+    if isinstance(authors, (str, dict)) or not isinstance(authors, (list, tuple)):
+        authors = [authors]
+    return sep.join(name for name in (author_name(a) for a in authors) if name)
+
+
 def read_client(
     api_url: Optional[str] = None,
     token: Optional[str] = None,
@@ -73,6 +113,7 @@ def read_client(
     """
     import typer
 
+    from mdf.core import config as core_config
     from mdf.core.backend_client import BackendClient, _api_url_for_service
 
     _hint = "pick one of staging, prod, dev, local — or pass --api-url"
@@ -98,6 +139,7 @@ def read_client(
         or (os.environ.get("MDF_CLIENT_ID") and os.environ.get("MDF_CLIENT_SECRET"))
         or dev_user
         or os.environ.get("MDF_DEV_USER_ID")
+        or core_config.load_saved_token()
     )
     # A cached interactive login also counts: route logged-in users through the
     # authenticated client (uses the cached token, no new browser prompt) so they
@@ -431,6 +473,48 @@ def interactive_stdin() -> bool:
         return sys.stdin.isatty()
     except Exception:
         return False
+
+
+def login_allowed(json_mode: bool) -> bool:
+    """The CLI's one rule for starting an interactive Globus login.
+
+    Only when a human is at both ends — stdin and stdout are TTYs — and the
+    caller did not ask for ``--json``. Everywhere else a missing login is an
+    ``auth`` error (exit 4), never a prompt.
+    """
+    import sys
+
+    if json_mode:
+        return False
+    try:
+        return interactive_stdin() and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def fail_auth_required(exc: BaseException, *, json_mode: bool) -> None:
+    """Report a login that was needed but not allowed; exit :data:`EXIT_AUTH`.
+
+    Never returns. ``--json`` gets the shared envelope (kind ``auth``);
+    human mode gets the error panel.
+    """
+    import typer
+    from rich.markup import escape
+
+    message, hint, _border = _ERROR_KINDS["auth"]
+    detail = str(exc) if str(exc) and str(exc) != message else None
+    if json_mode:
+        json_fail(kind="auth", message=message, hint=hint, exit_code=EXIT_AUTH)
+    console.print()
+    console.print(
+        theme.error_panel(
+            message,
+            title="Login required",
+            detail=escape(detail) if detail else None,
+            hint=hint,
+        )
+    )
+    raise typer.Exit(code=EXIT_AUTH)
 
 
 def confirm_or_abort(

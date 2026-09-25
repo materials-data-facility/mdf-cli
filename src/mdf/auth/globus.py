@@ -7,10 +7,12 @@ and related Globus services. It supports both token-based authentication
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 import webbrowser
 
 from globus_sdk import (
@@ -23,6 +25,7 @@ from globus_sdk import (
 from globus_sdk.tokenstorage import JSONTokenStorage
 
 from mdf.core import config as core_config
+from mdf.core.exceptions import AuthRequired
 
 # =============================================================================
 # MDF Agent Credentials
@@ -134,11 +137,57 @@ def should_open_browser(no_browser: bool = False) -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
+#: Whether a login may prompt when the caller passes ``interactive=None``.
+#: Library default is True (the SDK has always prompted, and foundry relies on
+#: it); the CLI narrows it per command with :func:`interactive_login`.
+_INTERACTIVE_DEFAULT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "mdf_interactive_login", default=True
+)
+
+
+@contextlib.contextmanager
+def interactive_login(allowed: bool) -> Iterator[None]:
+    """Set whether logins started inside this block may prompt.
+
+    Applies to every ``get_authorizer*`` / ``BackendClient.authenticated`` call
+    that does not pass ``interactive`` explicitly, including ones made deep
+    inside :class:`mdf.core.agent.MDFAgent`. With ``allowed=False`` a missing
+    login raises :class:`~mdf.core.exceptions.AuthRequired` instead.
+    """
+    reset_token = _INTERACTIVE_DEFAULT.set(bool(allowed))
+    try:
+        yield
+    finally:
+        _INTERACTIVE_DEFAULT.reset(reset_token)
+
+
+def _interactive_allowed(interactive: Optional[bool]) -> bool:
+    return _INTERACTIVE_DEFAULT.get() if interactive is None else bool(interactive)
+
+
+def _require_login(app: UserApp, *, interactive: Optional[bool], no_browser: bool) -> None:
+    """Log in if the token store cannot satisfy ``app``'s scopes.
+
+    Prompts (the URL, the code prompt) go to stderr so stdout stays clean for
+    data. When prompting is not allowed, raises ``AuthRequired`` instead.
+    """
+    if not app.login_required():
+        return
+    if not _interactive_allowed(interactive):
+        raise AuthRequired("No cached Globus login for this command")
+    print("Visit this URL, sign in, and paste the code:", file=sys.stderr)
+    _login_with_browser_fallback(app, no_browser=no_browser)
+
+
 def _login_with_browser_fallback(app: UserApp, no_browser: bool = False) -> None:
     """Run the interactive login flow, printing the URL before touching a browser.
 
     The URL is ALWAYS printed first: if a browser open blocks (headless text
     browser) the user has already seen the URL and can act on it.
+
+    globus_sdk prints the URL and the code prompt to stdout; the flow runs with
+    stdout redirected to stderr so a caller's stdout (``--json``, a pipe) is
+    never polluted. ``input()`` follows ``sys.stdout``, so its prompt moves too.
     """
     open_browser = should_open_browser(no_browser)
 
@@ -156,7 +205,8 @@ def _login_with_browser_fallback(app: UserApp, no_browser: bool = False) -> None
 
             flow_manager.print_authorize_url = _print_then_open
 
-    app.login()
+    with contextlib.redirect_stdout(sys.stderr):
+        app.login()
 
 
 def get_authorizer(
@@ -167,6 +217,7 @@ def get_authorizer(
     app_name: str = APP_NAME,
     token_path: Path = DEFAULT_TOKEN_PATH,
     no_browser: bool = False,
+    interactive: Optional[bool] = None,
 ) -> AccessTokenAuthorizer | RefreshTokenAuthorizer:
     """Get a Globus authorizer for MDF Connect.
 
@@ -183,11 +234,15 @@ def get_authorizer(
         app_name: Application name for OAuth2 flow.
         token_path: Path to store cached tokens.
         no_browser: If True, do not attempt to open a web browser automatically.
+        interactive: Whether a missing login may prompt. ``None`` (default)
+            follows :func:`interactive_login`, which is True unless a caller
+            narrowed it.
 
     Returns:
         A Globus authorizer ready for API calls.
 
     Raises:
+        AuthRequired: If a login is needed and prompting is not allowed.
         RuntimeError: If authentication fails or no valid auth method available.
 
     Examples:
@@ -235,10 +290,7 @@ def get_authorizer(
     # Add the required scope
     app.add_scope_requirements({resource_server: [scope]})
 
-    # Login if needed
-    if app.login_required():
-        print("Visit this URL, sign in, and paste the code:")
-        _login_with_browser_fallback(app, no_browser=no_browser)
+    _require_login(app, interactive=interactive, no_browser=no_browser)
 
     return app.get_authorizer(resource_server)
 
@@ -249,6 +301,7 @@ def get_authorizer_for_scopes(
     app_name: str = APP_NAME,
     token_path: Path = DEFAULT_TOKEN_PATH,
     no_browser: bool = False,
+    interactive: Optional[bool] = None,
 ) -> dict[str, AccessTokenAuthorizer | RefreshTokenAuthorizer]:
     """Get authorizers for multiple scopes (e.g., for clone + transfer).
 
@@ -258,9 +311,13 @@ def get_authorizer_for_scopes(
         app_name: Application name for OAuth2 flow.
         token_path: Path to store cached tokens.
         no_browser: If True, do not attempt to open a web browser automatically.
+        interactive: Whether a missing login may prompt (see :func:`get_authorizer`).
 
     Returns:
         Dictionary mapping resource server IDs to authorizers.
+
+    Raises:
+        AuthRequired: If a login is needed and prompting is not allowed.
     """
     client_id = client_id or MDF_AGENT_CLIENT_ID
 
@@ -276,9 +333,7 @@ def get_authorizer_for_scopes(
     scope_reqs = _build_scope_requirements(scopes)
     app.add_scope_requirements(scope_reqs)
 
-    if app.login_required():
-        print("Visit this URL, sign in, and paste the code:")
-        _login_with_browser_fallback(app, no_browser=no_browser)
+    _require_login(app, interactive=interactive, no_browser=no_browser)
 
     # UserApp always adds openid/profile/email for auth.globus.org;
     # include that authorizer so callers can use it for identity.
@@ -306,7 +361,6 @@ def logout(token_path: Path = DEFAULT_TOKEN_PATH) -> bool:
     """
     if token_path.exists():
         token_path.unlink()
-        print("Logged out and cleared cached tokens.")
         return True
     return False
 

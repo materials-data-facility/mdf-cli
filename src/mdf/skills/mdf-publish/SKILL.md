@@ -192,11 +192,16 @@ good", said about the draft, is not approval to submit. If there is any doubt, a
 mdf publish --submit --service staging
 ```
 
-Add `--update` if Stage 2 established this is a new version of an existing dataset —
-and in that case the manifest must carry the target: add
-`custom.mdf_source_id: "<source_id>"` (alongside `drafted_by`) before submitting. The
-server resolves which dataset to update from that field; `mdf publish --update` has no
-source-id argument and will be rejected without it.
+If Stage 2 established this is a new version of an existing dataset, use
+`mdf publish --update <source_id> --submit --service staging` instead. The ID is
+optional when `mdf.yaml` already has a top-level `source_id:` (the first successful
+publish writes it there) or when this machine published the dataset last. The update
+starts from the dataset's current metadata and applies the manifest on top, so fields
+the manifest leaves out (description, keywords, license, funding, related works) are
+kept. Do **not** put the ID in `custom.mdf_source_id` — that key is deprecated.
+
+A manifest that already carries `source_id:` is refused by a plain `--submit` (it would
+create a duplicate dataset); that refusal means "use `--update`".
 
 The CLI watches the submission automatically and stops at `pending_curation`. Report
 back to the user:
@@ -231,13 +236,15 @@ Two ways to apply the improvements — pick based on what changed:
    Note: the CLI exposes only these three fields today, even though the server accepts
    more.
 2. **Anything richer** (authors, license, funding, methods, facility,
-   fields_of_science, domains, ml, geo_locations, tags, extensions) — write the full
-   `mdf.yaml` in the cloned directory with `update_metadata_only: true` **and**
-   `custom.mdf_source_id: "<source_id>"` (the server resolves the update target from
-   that field; without it the update is rejected), then go through Gate #2 with:
+   fields_of_science, domains, ml, geo_locations, tags, extensions) — write an
+   `mdf.yaml` in the cloned directory with `source_id: "<source_id>"` at the top level,
+   `update_metadata_only: true`, and only the fields you are changing (the update keeps
+   every field you leave out), then go through Gate #2 with:
    ```bash
    mdf publish --update --submit --service staging
    ```
+   Preview the exact payload first with `mdf publish --update --json --service staging`
+   (a dry run by default).
 
 The server's editable-field allowlist is: `title`, `authors`, `description`, `keywords`,
 `license`, `funding`, `related_works`, `methods`, `facility`, `fields_of_science`,

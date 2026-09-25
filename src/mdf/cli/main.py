@@ -20,12 +20,15 @@ from typing import Any, Dict, List, Optional
 
 import typer
 import typer.rich_utils as typer_rich_utils
+from typer.core import TyperGroup
 from rich import box as rich_box
 from rich.markup import escape
 from rich.panel import Panel as RichPanel
 
 from mdf.version import __version__
+from mdf.auth.globus import interactive_login
 from mdf.core.agent import MDFAgent
+from mdf.core.exceptions import AuthRequired
 from mdf.core.backend_client import BackendClient, _api_url_for_service
 from mdf.core.config import GlobalConfig, resolve_service
 from mdf.cli import theme
@@ -41,11 +44,16 @@ from mdf.cli.formatting import (
     console,
     emit_json,
     emit_json_result,
+    err_console,
     exit_code_for,
+    fail_auth_required,
+    format_authors,
     format_status_badge,
+    interactive_stdin,
     is_success,
     json_fail,
     json_ok,
+    login_allowed,
     read_client,
     require_success,
     resolve_identifier_with_notice,
@@ -65,7 +73,27 @@ from mdf.cli.preflight import (
 )
 
 
+class MDFGroup(TyperGroup):
+    """Root command group: applies the CLI's login policy to every command.
+
+    Commands may only start an interactive Globus login when
+    :func:`~mdf.cli.formatting.login_allowed` says so (TTY on stdin and
+    stdout, no ``--json``). Otherwise core raises ``AuthRequired`` — also from
+    logins started deep inside ``MDFAgent`` — and it is reported here as the
+    ``auth`` error: the JSON envelope under ``--json``, exit code 4.
+    """
+
+    def invoke(self, ctx: typer.Context) -> Any:
+        json_mode = "--json" in [*ctx._protected_args, *ctx.args]
+        with interactive_login(login_allowed(json_mode)):
+            try:
+                return super().invoke(ctx)
+            except AuthRequired as exc:
+                fail_auth_required(exc, json_mode=json_mode)
+
+
 app = typer.Typer(
+    cls=MDFGroup,
     help="MDF Agent — Materials Data Facility",
     add_completion=True,
     invoke_without_command=True,
@@ -437,6 +465,8 @@ def _watch_submission(
             )
             result = client.status(lookup_id)
             client.close()
+        except AuthRequired:
+            raise
         except Exception as exc:
             if json_output:
                 print(json.dumps({"source_id": lookup_id, "error": str(exc), "elapsed": round(elapsed)}))
@@ -478,6 +508,48 @@ def _watch_submission(
         time.sleep(interval)
 
 
+def _fetch_identity(
+    *,
+    service: str,
+    api_url: Optional[str] = None,
+    token: Optional[str] = None,
+    dev_user: Optional[str] = None,
+) -> Dict[str, str]:
+    """Best-effort ``{"name", "email"}`` for the current credentials.
+
+    Asks the backend (``GET /auth/check``), which reads the identity from the
+    token. Never prompts and never fails the caller: any problem (no login,
+    network, an old backend) just means no identity is shown.
+    """
+    try:
+        client = BackendClient.authenticated(
+            base_url=api_url,
+            token=token,
+            service_instance=service,
+            dev_user_id=dev_user,
+            interactive=False,
+        )
+    except Exception:
+        return {}
+    try:
+        result = client.auth_check()
+    except Exception:
+        return {}
+    finally:
+        client.close()
+    if not is_success(result):
+        return {}
+    return {key: str(result[key]) for key in ("name", "email") if result.get(key)}
+
+
+def _identity_label(identity: Dict[str, str]) -> Optional[str]:
+    """``Jane Doe <jane@example.org>`` / ``Jane Doe`` / ``jane@example.org``."""
+    name, email = identity.get("name"), identity.get("email")
+    if name and email:
+        return f"{name} <{email}>"
+    return name or email or None
+
+
 def _render_identity(
     *,
     service: str,
@@ -486,10 +558,14 @@ def _render_identity(
     method: Optional[str] = None,
     env_token: bool = False,
     env_client: bool = False,
+    identity: Optional[Dict[str, str]] = None,
 ) -> None:
     """The identity panel used by `mdf status --auth` and `mdf whoami`."""
     authenticated = status_str == "authenticated"
     detail = theme.detail_table(label_width=12)
+    who = _identity_label(identity or {})
+    if who:
+        detail.add_row("Signed in as", escape(who))
     detail.add_row("Service", theme.ident(service))
     detail.add_row(
         "Status",
@@ -705,14 +781,11 @@ def setup(
     console.print()
 
     cfg = GlobalConfig()
-    service_default = resolve_service(None)
-    service = typer.prompt(
-        "Default service",
-        default=service_default,
-        show_default=True,
-    ).strip().lower()
-    if service:
-        cfg.set("defaults.service", service)
+    # The service is deliberately not asked for or persisted: a stored
+    # `defaults.service` would silently pin this machine to today's default
+    # (staging) after the release default flips to prod. Use --service,
+    # MDF_SERVICE or `mdf config set defaults.service` to choose explicitly.
+    service = resolve_service(None)
 
     organization = typer.prompt(
         "Organization (optional)",
@@ -822,6 +895,11 @@ def setup(
 def login(
     service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance (staging/prod/dev)"),
     token: Optional[str] = typer.Option(None, "--token", help="Use an explicit access token"),
+    save: bool = typer.Option(
+        False,
+        "--save",
+        help="With --token: keep the token for later commands (owner-only file under ~/.config/mdf)",
+    ),
     no_browser: bool = typer.Option(
         False,
         "--no-browser",
@@ -838,6 +916,7 @@ def login(
 
       MDF_CLIENT_ID + MDF_CLIENT_SECRET   Globus confidential client credentials
       MDF_CONNECT_TOKEN                   Pre-existing access token
+      mdf login --token T --save          Validate T once and keep it for later commands
     """
     from mdf.auth.globus import (
         DEFAULT_TOKEN_PATH,
@@ -860,6 +939,17 @@ def login(
         ))
         raise typer.Exit(code=1)
 
+    if save and not token:
+        console.print()
+        console.print(theme.error_panel(
+            "--save needs --token",
+            title="Nothing to save",
+            hint="mdf login --token <ACCESS_TOKEN> --save  (or plain `mdf login` for a Globus login)",
+        ))
+        raise typer.Exit(code=EXIT_USAGE)
+
+    identity: Dict[str, str] = {}
+    saved_path = None
     if token:
         client = BackendClient.authenticated(token=token, service_instance=resolved)
         try:
@@ -877,18 +967,46 @@ def login(
         ):
             error = auth_result.get("error") or auth_result.get("detail") or "token was rejected"
             _reject_token(str(error))
+        identity = {key: str(auth_result[key]) for key in ("name", "email") if auth_result.get(key)}
+        if save:
+            from mdf.core.config import save_token
+
+            saved_path = save_token(token)
     else:
         scope, _rs = get_scopes_for_service(resolved)
-        get_authorizer_for_scopes(
-            [scope, DATA_MDF_SCOPE, TRANSFER_SCOPE, GROUPS_SCOPE],
-            no_browser=no_browser,
-        )
+        try:
+            # Logging in is this command's whole job, so it may prompt whenever
+            # a human can type the code — prompts go to stderr, so a piped
+            # stdout is fine. With no TTY on stdin it cannot, and says so.
+            get_authorizer_for_scopes(
+                [scope, DATA_MDF_SCOPE, TRANSFER_SCOPE, GROUPS_SCOPE],
+                no_browser=no_browser,
+                interactive=interactive_stdin(),
+            )
+        except AuthRequired:
+            console.print()
+            console.print(theme.error_panel(
+                "Interactive login needs a terminal (stdin is not a TTY).",
+                title="Login required",
+                hint=(
+                    "run `mdf login` in a terminal; for scripts/CI set MDF_CONNECT_TOKEN, "
+                    "or MDF_CLIENT_ID + MDF_CLIENT_SECRET, or use `mdf login --token T --save`"
+                ),
+            ))
+            raise typer.Exit(code=EXIT_AUTH)
+        identity = _fetch_identity(service=resolved)
 
     detail = theme.detail_table(label_width=12)
+    who = _identity_label(identity)
+    if who:
+        detail.add_row("Signed in as", escape(who))
     detail.add_row("Service", theme.ident(resolved))
-    detail.add_row("Token store", escape(str(DEFAULT_TOKEN_PATH)))
-    if token:
-        detail.add_row("Source", "token from --token (this invocation only)")
+    if token and saved_path:
+        detail.add_row("Token", f"saved to {escape(str(saved_path))}")
+    elif token:
+        detail.add_row("Token", "valid (not saved: pass --save to keep it)")
+    else:
+        detail.add_row("Token store", escape(str(DEFAULT_TOKEN_PATH)))
     console.print()
     console.print(theme.success_panel(detail, title="Authentication ready"))
 
@@ -897,11 +1015,17 @@ def login(
 def logout():
     """Clear cached credentials."""
     from mdf.auth.globus import DEFAULT_TOKEN_PATH, logout as clear_cached_tokens
+    from mdf.core.config import clear_saved_token, saved_token_path
 
-    removed = clear_cached_tokens()
-    if removed:
+    removed_paths = []
+    if clear_cached_tokens():
+        removed_paths.append(DEFAULT_TOKEN_PATH)
+    if clear_saved_token():
+        removed_paths.append(saved_token_path())
+    if removed_paths:
         console.print(theme.mark("ok", "Logged out", style="ok"))
-        console.print(f"[hint]cached Globus tokens removed from {escape(str(DEFAULT_TOKEN_PATH))}[/hint]")
+        removed = ", ".join(escape(str(path)) for path in removed_paths)
+        console.print(f"[hint]removed {removed}[/hint]")
     else:
         console.print(theme.check_line(
             "idle",
@@ -942,6 +1066,7 @@ def status(
     # --auth mode: show identity info (absorbs old whoami)
     if auth:
         from mdf.auth.globus import DEFAULT_TOKEN_PATH, is_logged_in
+        from mdf.core.config import load_saved_token
 
         cached = is_logged_in(service_instance=resolved)
         env_token = bool(os.environ.get("MDF_CONNECT_TOKEN"))
@@ -953,6 +1078,8 @@ def status(
             method = "confidential client (MDF_CLIENT_ID)"
         elif env_token:
             method = "environment token (MDF_CONNECT_TOKEN)"
+        elif load_saved_token():
+            method = "saved token (mdf login --token --save)"
         elif cached:
             method = "cached Globus login"
         else:
@@ -960,6 +1087,11 @@ def status(
 
         authenticated = bool(method)
         status_str = "authenticated" if authenticated else "not authenticated"
+        identity = (
+            _fetch_identity(service=resolved, api_url=api_url, token=token, dev_user=dev_user)
+            if authenticated
+            else {}
+        )
 
         # `success` is the answer to "am I authenticated?", not "did this
         # command run" — an unauthenticated caller must be able to branch on it
@@ -969,6 +1101,8 @@ def status(
             "service": resolved,
             "status": status_str,
             "method": method,
+            "name": identity.get("name"),
+            "email": identity.get("email"),
             "token_store": str(DEFAULT_TOKEN_PATH),
             "env_token_set": env_token,
             "env_client_set": env_client,
@@ -991,6 +1125,7 @@ def status(
             method=method,
             env_token=env_token,
             env_client=env_client,
+            identity=identity,
         )
         if not authenticated:
             raise typer.Exit(code=EXIT_AUTH)
@@ -1071,15 +1206,64 @@ def status(
 # Publish
 # ---------------------------------------------------------------------------
 
+#: C10a: staging is the public beta service. Printed on every submit to it.
+_STAGING_DOI_NOTICE = (
+    "Beta: the staging service mints DataCite test DOIs (prefix 10.23677); "
+    "they do not resolve on doi.org."
+)
+
+
+def _targets_staging(resolved: str, api_url: Optional[str]) -> bool:
+    """True when a submit goes to the staging service (not an overridden URL)."""
+    return (
+        resolved.strip().lower() == "staging"
+        and not api_url
+        and not os.environ.get("MDF_API_URL")
+    )
+
+
+def _fail_usage(
+    json_output: bool,
+    message: str,
+    *,
+    title: str,
+    hint: str,
+    detail: Optional[str] = None,
+) -> None:
+    """A usage/validation failure in either output mode; exits 2. Never returns."""
+    if json_output:
+        json_fail(kind="validation", message=message, hint=hint)
+    console.print()
+    console.print(theme.error_panel(escape(message), title=title, detail=detail, hint=hint))
+    raise typer.Exit(code=EXIT_USAGE)
+
+
+def _looks_like_dataset_id(value: str) -> bool:
+    """Whether the first positional after ``--update`` names a dataset, not data.
+
+    Anything that exists on disk or carries a URI scheme is data; the rest is
+    an ID (or DOI) of the dataset to update.
+    """
+    return "://" not in value and not Path(value).exists()
+
+
 @app.command(rich_help_panel=PANEL_PUBLISH)
 def publish(
-    data: Optional[List[str]] = typer.Argument(None, help="Data paths/URIs to publish"),
+    data: Optional[List[str]] = typer.Argument(
+        None, help="Data paths/URIs to publish (with --update, an optional dataset ID first)"
+    ),
     title: Optional[str] = typer.Option(None, "--title", "-t", help="Dataset title"),
     author: Optional[List[str]] = typer.Option(None, "--author", "-a", help="Author name (repeatable)"),
     description: Optional[str] = typer.Option(None, "--description", "-d", help="Dataset description"),
     dry_run: bool = typer.Option(True, "--dry-run/--submit", help="Preview without submitting"),
     test: bool = typer.Option(False, "--test", help="Submit to test environment"),
-    update: bool = typer.Option(False, "--update", "-u", help="Update existing dataset"),
+    update: bool = typer.Option(
+        False,
+        "--update",
+        "-u",
+        help="Publish a new version of an existing dataset: --update [ID] "
+        "(default ID: source_id in mdf.yaml, then your last publish)",
+    ),
     json_output: bool = typer.Option(False, "--json", help="JSON output"),
     preflight_only: bool = typer.Option(False, "--preflight-only", help="Run submit-time checks without uploading"),
     no_watch: bool = typer.Option(False, "--no-watch", help="Do not watch after a successful submit"),
@@ -1101,38 +1285,95 @@ def publish(
     3. Manifest + overrides:
         mdf publish --title "New Title" --submit
 
+    The first successful publish writes the new dataset's source_id into
+    mdf.yaml. To publish a new version of it later:
+
+        mdf publish --update --submit                  # ID from mdf.yaml / last publish
+        mdf publish --update my_dataset_id --submit    # explicit ID (or DOI)
+        mdf publish --update my_dataset_id ./new_data/ --submit
+
+    An update starts from the dataset's current metadata (description,
+    keywords, license, funding, related works, ...) and applies your changes
+    (mdf.yaml fields and --title/--author/--description) on top. Without data
+    paths it is a metadata-only update that keeps the previous files.
+
     By default, performs a dry run showing the payload.
     Use --submit to actually send to MDF Connect.
     """
+    data_args = list(data or [])
+    update_id: Optional[str] = None
+    if update and data_args and _looks_like_dataset_id(data_args[0]):
+        update_id, data_args = data_args[0], data_args[1:]
+    _run_publish(
+        data=data_args,
+        title=title,
+        author=author,
+        description=description,
+        dry_run=dry_run,
+        test=test,
+        update=update,
+        update_id=update_id,
+        json_output=json_output,
+        preflight_only=preflight_only,
+        no_watch=no_watch,
+        service=service,
+        api_url=api_url,
+        token=token,
+        dev_user=dev_user,
+    )
+
+
+def _run_publish(
+    *,
+    data: List[str],
+    title: Optional[str],
+    author: Optional[List[str]],
+    description: Optional[str],
+    dry_run: bool,
+    test: bool,
+    update: bool,
+    update_id: Optional[str],
+    json_output: bool,
+    preflight_only: bool,
+    no_watch: bool,
+    service: Optional[str],
+    api_url: Optional[str],
+    token: Optional[str],
+    dev_user: Optional[str],
+) -> None:
+    """``mdf publish`` (and the hidden ``mdf update`` alias)."""
+    from mdf.core.manifest import manifest_from_metadata, merge_manifests, write_source_id
     from mdf.models.config import ManifestConfig
 
     resolved = resolve_service(service)
 
     manifest_path = Path.cwd() / "mdf.yaml"
+    manifest_mode = False
 
     if data:
-        for flag in ("--title", "--author"):
-            if (flag == "--title" and not title) or (flag == "--author" and not author):
-                console.print()
-                console.print(theme.error_panel(
-                    f"Direct mode requires {flag}",
-                    title="Missing metadata",
-                    hint='example: mdf publish ./data/ --title "My Dataset" --author "Jane"',
-                ))
-                raise typer.Exit(code=1)
-
+        if not update:
+            for flag, value in (("--title", title), ("--author", author)):
+                if not value:
+                    _fail_usage(
+                        json_output,
+                        f"Direct mode requires {flag}",
+                        title="Missing metadata",
+                        hint='example: mdf publish ./data/ --title "My Dataset" --author "Jane"',
+                    )
         cfg = GlobalConfig()
         manifest = ManifestConfig(
             title=title,
             authors=author,
             description=description,
             data_sources=list(data),
-            publisher=cfg.publisher,
-            organization=cfg.organization,
+            # Config defaults fill a new dataset; an update keeps the dataset's own.
+            publisher=None if update else cfg.publisher,
+            organization=None if update else cfg.organization,
         )
         agent = MDFAgent(root=None, manifest=manifest)
 
     elif manifest_path.exists():
+        manifest_mode = True
         agent = MDFAgent.from_manifest(".")
         if title:
             agent.manifest.title = title
@@ -1140,12 +1381,19 @@ def publish(
             agent.manifest.authors = author
         if description:
             agent.manifest.description = description
-        if not agent.manifest.data_sources:
+        if not agent.manifest.data_sources and not update:
             agent.manifest.data_sources = ["."]
 
+    elif update:
+        # Metadata-only update driven by flags alone.
+        agent = MDFAgent(
+            root=None,
+            manifest=ManifestConfig(title=title, authors=author, description=description),
+        )
+
     else:
-        console.print()
-        console.print(theme.error_panel(
+        _fail_usage(
+            json_output,
             "No data paths provided and no mdf.yaml found",
             title="Nothing to publish",
             detail=(
@@ -1153,8 +1401,77 @@ def publish(
                 "Manifest mode:  mdf setup  →  mdf publish --submit"
             ),
             hint="run `mdf setup` to create an mdf.yaml in this directory",
-        ))
-        raise typer.Exit(code=1)
+        )
+
+    if not update and agent.manifest.source_id:
+        # mdf.yaml was published before: a plain publish would create a second
+        # dataset (the server gives it a new id). Make that a choice, not an accident.
+        known_id = agent.manifest.source_id
+        if not dry_run and not preflight_only:
+            _fail_usage(
+                json_output,
+                f"mdf.yaml is already published as {known_id}",
+                title="Already published",
+                hint=(
+                    "add a version with `mdf publish --update --submit`, or delete "
+                    "`source_id` from mdf.yaml to publish it as a new dataset"
+                ),
+            )
+        chrome(json_output).print(
+            f"[warn]mdf.yaml is already published as[/warn] {theme.ident(known_id)} "
+            "[hint]— use --update to add a version[/hint]"
+        )
+
+    if update:
+        from mdf.core.manifest import load_manifest
+
+        cfg = GlobalConfig()
+        # ID: the argument, else mdf.yaml (even when data paths were given),
+        # else the last publish from this machine.
+        manifest_id = agent.manifest.source_id or (
+            load_manifest(manifest_path).source_id if manifest_path.exists() else None
+        )
+        target_id = update_id or manifest_id or cfg.last_source_id
+        if not target_id:
+            _fail_usage(
+                json_output,
+                "No dataset to update: no ID given, no source_id in mdf.yaml, no previous publish.",
+                title="Nothing to update",
+                hint="pass the ID: `mdf publish --update <source_id> --submit` (find it with `mdf list`)",
+                detail=(
+                    f"'{escape(data[0])}' exists on disk, so it was read as data, not as a dataset ID."
+                    if data
+                    else None
+                ),
+            )
+        if not update_id:
+            origin = "mdf.yaml" if manifest_id else "your last publish"
+            chrome(json_output).print(
+                f"[secondary]Updating {origin}:[/secondary] {theme.ident(target_id)}"
+            )
+
+        client = BackendClient.authenticated(
+            base_url=api_url, token=token, service_instance=resolved, dev_user_id=dev_user
+        )
+        try:
+            target_id = _resolve_identifier_with_notice(client, target_id, json_mode=json_output)
+            with api_spinner("Loading the current version..."):
+                previous = client.status(target_id)
+        finally:
+            client.close()
+        if not is_success(previous):
+            if json_output:
+                json_fail(previous)
+            require_success(previous, error_prefix=f"Could not load {target_id}")
+
+        submission = previous.get("submission") or {}
+        # Full metadata of the latest version, not the (partial) public card:
+        # the card omits funding and related works.
+        base = manifest_from_metadata(_parse_submission_mdata(submission))
+        agent.manifest = merge_manifests(base, agent.manifest)
+        agent.manifest.source_id = submission.get("source_id") or target_id
+        if not agent.manifest.data_sources:
+            agent.manifest.update_metadata_only = True
 
     preflight = run_preflight(
         agent.manifest,
@@ -1219,13 +1536,15 @@ def publish(
         _render_preflight(preflight, title="Publish preflight")
         target = api_url or _api_url_for_service(resolved)
         console.print()
-        console.print(theme.rule("Dry run — would submit"))
+        console.print(theme.rule("Dry run — would update" if update else "Dry run — would submit"))
         console.print(f"[label]Target:[/label] {escape(str(target))} [secondary]({escape(resolved)})[/secondary]")
+        if update:
+            console.print(f"[label]Source ID:[/label] {theme.ident(agent.manifest.source_id)}")
         console.print()
         console.print(theme.json_syntax(payload))
         console.print()
         console.print(theme.panel(
-            "[id]mdf publish --submit[/id]",
+            "[id]mdf publish --update --submit[/id]" if update else "[id]mdf publish --submit[/id]",
             title=f"{theme.PACKAGE} Ready to publish",
         ))
         return
@@ -1255,13 +1574,23 @@ def publish(
             hint="check connectivity with `mdf config doctor`, then retry `mdf publish --submit`",
         )
 
+    published = is_success(result)
+    source_id_val = result.get("source_id") if published else None
+    version_val = result.get("version") if published else None
+    saved_to_manifest = False
+    if source_id_val:
+        GlobalConfig().record_publish(source_id_val, version_val, resolved)
+        if manifest_mode:
+            saved_to_manifest = write_source_id(manifest_path, source_id_val)
+    # Stderr in both modes, so the --json payload keeps its shape.
+    if source_id_val and _targets_staging(resolved, api_url):
+        err_console.print(f"[warn]{_STAGING_DOI_NOTICE}[/warn]", soft_wrap=True)
+
     if json_output:
         emit_json_result(result)
         return
 
-    if result.get("success"):
-        source_id_val = result.get("source_id")
-        version_val = result.get("version")
+    if published:
         detail = theme.detail_table(label_width=11)
         detail.add_row("Source ID", theme.ident(source_id_val))
         detail.add_row("Service", escape(str(resolved)))
@@ -1271,33 +1600,36 @@ def publish(
         console.print()
         console.print(theme.success_panel(
             detail,
-            title="Published successfully!",
+            title="Updated successfully!" if update else "Published successfully!",
             emoji=theme.PACKAGE,
             subtitle="awaiting curation",
         ))
-
-        if source_id_val:
-            cfg = GlobalConfig()
-            cfg.record_publish(source_id_val, version_val, resolved)
-            console.print(f"[hint]Try: mdf status {source_id_val} | mdf show {source_id_val}[/hint]")
-            if no_watch:
-                console.print(f"[hint]Watch: mdf status --watch {source_id_val}[/hint]")
-            else:
-                raise typer.Exit(
-                    code=_watch_submission(
-                        source_id_val,
-                        interval=5,
-                        timeout=1800,
-                        service=resolved,
-                        api_url=api_url,
-                        token=token,
-                        dev_user=dev_user,
-                        announce=True,
-                        stop_on_statuses={"pending_curation"},
-                    )
+        if saved_to_manifest:
+            console.print(
+                "[hint]Saved source_id to mdf.yaml — `mdf publish --update --submit` "
+                "adds a new version.[/hint]"
+            )
+        if not source_id_val:
+            return
+        console.print(f"[hint]Try: mdf status {source_id_val} | mdf show {source_id_val}[/hint]")
+        if no_watch:
+            console.print(f"[hint]Watch: mdf status --watch {source_id_val}[/hint]")
+        else:
+            raise typer.Exit(
+                code=_watch_submission(
+                    source_id_val,
+                    interval=5,
+                    timeout=1800,
+                    service=resolved,
+                    api_url=api_url,
+                    token=token,
+                    dev_user=dev_user,
+                    announce=True,
+                    stop_on_statuses={"pending_curation"},
                 )
+            )
     else:
-        require_success(result, error_prefix="Publish failed")
+        require_success(result, error_prefix="Update failed" if update else "Publish failed")
 
 
 # ---------------------------------------------------------------------------
@@ -1440,6 +1772,8 @@ def _abort_on_exception(
     :data:`EXIT_CODE_BY_KIND` maps ``kind`` to, so the two modes never disagree
     about ``$?``. Never returns.
     """
+    if isinstance(exc, AuthRequired):
+        fail_auth_required(exc, json_mode=json_output)
     if json_output:
         json_fail(kind=kind, message=str(exc), hint=hint)
     console.print()
@@ -1449,6 +1783,18 @@ def _abort_on_exception(
         hint=hint,
     ))
     raise typer.Exit(code=EXIT_CODE_BY_KIND.get(kind, EXIT_ERROR))
+
+
+def _add_id_column(table: Any, header: str, ids: List[Any]) -> None:
+    """Add a first column that shows every identifier in full.
+
+    IDs are what the next command needs, so they are never ellipsized: the
+    column is as wide as the longest ID and does not wrap. On a terminal too
+    narrow even for that, Rich folds the ID onto a second line rather than
+    cutting it.
+    """
+    width = max([len(header)] + [len(str(value)) for value in ids if value])
+    table.add_column(header, style="id", no_wrap=True, min_width=width, overflow="fold")
 
 
 def _render_search_facets(
@@ -1714,32 +2060,26 @@ def search(
         console.print(f"\n{theme.SEARCH} [bold]Found[/bold] {theme.number(total)} {subject}\n")
 
         table = theme.table()
-        table.add_column("#", style="secondary", width=3, justify="right")
-        table.add_column("Type", width=8, style="secondary")
-        table.add_column("Title", max_width=40)
-        table.add_column("ID", max_width=28, no_wrap=True, style="id")
-        table.add_column("Status", no_wrap=True)
-        table.add_column("DOI", style="secondary", max_width=24)
+        # The ID comes first and is never truncated: it is what the next
+        # command (`mdf show <id>`) needs, copied verbatim (CLI-U5).
+        _add_id_column(
+            table,
+            "ID",
+            [item.get("source_id") or item.get("stream_id") for item in result["results"]],
+        )
+        # No Type/Status columns: public search only returns published
+        # datasets, and a full-width ID leaves no room for constant columns.
+        table.add_column("Version", style="secondary", no_wrap=True)
+        table.add_column("Title", max_width=60)
+        table.add_column("DOI", style="secondary", max_width=24, overflow="fold")
 
-        for i, item in enumerate(result["results"], offset + 1):
-            if item.get("type") == "dataset":
-                table.add_row(
-                    str(i),
-                    "dataset",
-                    escape(str(item.get("title", "Untitled"))),
-                    f"{escape(str(item.get('source_id')))} v{escape(str(item.get('version')))}",
-                    format_status_badge(item.get("status", "")),
-                    escape(str(item.get("doi", ""))),
-                )
-            else:
-                table.add_row(
-                    str(i),
-                    "stream",
-                    escape(str(item.get("title", "Untitled"))),
-                    escape(str(item.get("stream_id", ""))),
-                    f"{theme.number(item.get('file_count', 0))} files",
-                    "",
-                )
+        for item in result["results"]:
+            table.add_row(
+                escape(str(item.get("source_id") or item.get("stream_id") or "")),
+                escape(str(item.get("version") or "")),
+                escape(str(item.get("title", "Untitled"))),
+                escape(str(item.get("doi", ""))),
+            )
 
         console.print(table)
         _render_search_facets(result.get("facets"), active_filters)
@@ -1987,7 +2327,7 @@ def list_datasets(
         f"\n[bold]Your datasets[/bold] [secondary]([/secondary]{theme.number(len(filtered_submissions))}[secondary])[/secondary]\n"
     )
     table = theme.table()
-    table.add_column("Source ID", max_width=28, no_wrap=True, style="id")
+    _add_id_column(table, "Source ID", [sub.get("source_id") for sub, _ in filtered_submissions])
     table.add_column("Title", max_width=40)
     table.add_column("Version", style="secondary", no_wrap=True, justify="right")
     table.add_column("Status", no_wrap=True)
@@ -2111,7 +2451,7 @@ def related(
             f"to {theme.ident(resolved_id)} [secondary](by embedding)[/secondary]\n"
         )
         table = theme.table()
-        table.add_column("Source ID", max_width=28, no_wrap=True, style="id")
+        _add_id_column(table, "Source ID", [row.get("source_id") for row in results])
         table.add_column("Title", max_width=40)
         table.add_column("Score", style="value", justify="right")
         table.add_column("Year", style="secondary", no_wrap=True, justify="right")
@@ -2134,7 +2474,7 @@ def related(
         f"sharing authors with {theme.ident(resolved_id)}\n"
     )
     table = theme.table()
-    table.add_column("Source ID", max_width=28, no_wrap=True, style="id")
+    _add_id_column(table, "Source ID", [row.get("source_id") for row in results])
     table.add_column("Title", max_width=40)
     table.add_column("Shared", style="value", justify="right")
     table.add_column("Year", style="secondary", no_wrap=True, justify="right")
@@ -2181,7 +2521,9 @@ def show(
     client.close()
 
     if json_output:
-        output = {"card": result}
+        # The API response already is {"success", "card", "permissions"}: emit
+        # it as-is (never nested under another "card"), plus the citation.
+        output = dict(result)
         if citation_result:
             output["citation"] = citation_result
         emit_json_result(result, output)
@@ -2203,7 +2545,7 @@ def show(
     table = theme.detail_table()
 
     if c.get("authors"):
-        table.add_row("Authors", escape(", ".join(c["authors"])))
+        table.add_row("Authors", escape(format_authors(c["authors"])))
     if c.get("publisher"):
         table.add_row("Publisher", escape(str(c["publisher"])))
     if c.get("publication_year"):
@@ -2353,43 +2695,20 @@ def whoami(
     service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
     json_output: bool = typer.Option(False, "--json", help="JSON output"),
 ):
-    """Show current authentication status."""
-    from mdf.auth.globus import DEFAULT_TOKEN_PATH, is_logged_in
-
-    resolved = resolve_service(service)
-    cached = is_logged_in(service_instance=resolved)
-    env_token = bool(os.environ.get("MDF_CONNECT_TOKEN"))
-    authenticated = bool(cached or env_token)
-    status_str = "authenticated" if authenticated else "not authenticated"
-
-    # `success` answers "am I authenticated?" — it used to be hardcoded true,
-    # which made `mdf whoami --json` useless as a login probe.
-    result = {
-        "success": authenticated,
-        "service": resolved,
-        "status": status_str,
-        "token_store": str(DEFAULT_TOKEN_PATH),
-        "env_token_set": env_token,
-    }
-
-    if json_output:
-        if not authenticated:
-            json_fail(
-                kind="auth",
-                message="Not authenticated",
-                extra={k: v for k, v in result.items() if k != "success"},
-            )
-        emit_json(result)
-        return
-
-    _render_identity(
-        service=resolved,
-        status_str=status_str,
-        token_store=str(DEFAULT_TOKEN_PATH),
-        env_token=env_token,
+    """Show current authentication status (same as `mdf status --auth`)."""
+    status(
+        source_id=None,
+        auth=True,
+        watch=False,
+        interval=10,
+        timeout=1800,
+        version=None,
+        json_output=json_output,
+        service=service,
+        api_url=None,
+        token=None,
+        dev_user=None,
     )
-    if not authenticated:
-        raise typer.Exit(code=EXIT_AUTH)
 
 
 @app.command("watch", hidden=True)
@@ -2403,41 +2722,19 @@ def watch_cmd(
     token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
     dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
 ):
-    """Watch a dataset until it reaches a terminal state."""
-    resolved = resolve_service(service)
-
-    lookup_id = source_id
-    if not lookup_id:
-        cfg = GlobalConfig()
-        lookup_id = cfg.last_source_id
-        if not lookup_id:
-            console.print(theme.error_panel(
-                "No source_id provided and no last published dataset.",
-                title="Nothing to watch",
-                hint="usage: mdf status --watch <source_id>",
-            ))
-            raise typer.Exit(code=1)
-    client = BackendClient.authenticated(
-        base_url=api_url,
+    """Watch a dataset until it reaches a terminal state (same as `mdf status --watch`)."""
+    status(
+        source_id=source_id,
+        auth=False,
+        watch=True,
+        interval=interval,
+        timeout=timeout,
+        version=None,
+        json_output=json_output,
+        service=service,
+        api_url=api_url,
         token=token,
-        service_instance=resolved,
-        dev_user_id=dev_user,
-    )
-    lookup_id = _resolve_identifier_with_notice(client, lookup_id)
-    client.close()
-
-    raise typer.Exit(
-        code=_watch_submission(
-            lookup_id,
-            interval=interval,
-            timeout=timeout,
-            service=resolved,
-            api_url=api_url,
-            token=token,
-            dev_user=dev_user,
-            json_output=json_output,
-            announce=True,
-        )
+        dev_user=dev_user,
     )
 
 
@@ -2467,7 +2764,7 @@ def cite_alias(
 ):
     """Get citation for a dataset."""
     from mdf.cli.dataset_cmd import cite
-    cite(source_id=source_id, format=format, copy=copy, version=version,
+    cite(source_id=source_id, format=format, output=None, copy=copy, version=version,
          json_output=json_output, service=service, api_url=api_url, token=token, dev_user=dev_user)
 
 
@@ -2682,7 +2979,7 @@ def stats_alias(
     stats(json_output=json_output, service=service, api_url=api_url, token=token, dev_user=dev_user)
 
 
-# Hidden alias for update (publish --update covers this)
+# Hidden alias for `publish --update` (removed in the C8 clean break)
 @app.command(hidden=True, name="update")
 def update_alias(
     source_id: Optional[str] = typer.Argument(None, help="Source ID of dataset to update"),
@@ -2699,196 +2996,24 @@ def update_alias(
     token: Optional[str] = typer.Option(None, "--token"),
     dev_user: Optional[str] = typer.Option(None, "--dev-user"),
 ):
-    """Update an existing published dataset."""
-    from mdf.models.config import ManifestConfig
-
-    resolved = resolve_service(service)
-
-    resolved_source_id = source_id
-    if not resolved_source_id:
-        cfg = GlobalConfig()
-        resolved_source_id = cfg.last_source_id
-        if not resolved_source_id:
-            console.print(theme.error_panel(
-                "No source_id provided and no last published dataset.",
-                title="Nothing to update",
-                hint="usage: mdf publish --update --data ./new_data/ --submit",
-            ))
-            raise typer.Exit(code=1)
-        if not json_output:
-            console.print(
-                f"[secondary]Using last published dataset:[/secondary] {theme.ident(resolved_source_id)}"
-            )
-
-    cfg = GlobalConfig()
-    existing_title = resolved_source_id
-    existing_authors: List[str] = []
-    try:
-        _base = api_url or _api_url_for_service(resolved)
-        _client = BackendClient.authenticated(
-            base_url=_base, token=token, service_instance=resolved, dev_user_id=dev_user,
-        )
-        try:
-            resolved_source_id = _resolve_identifier_with_notice(_client, resolved_source_id)
-            with api_spinner("Fetching existing metadata..."):
-                card = _client.get_card(resolved_source_id)
-            if is_success(card) and card.get("card"):
-                c = card["card"]
-                existing_title = c.get("title", resolved_source_id)
-                existing_authors = c.get("authors", [])
-        finally:
-            _client.close()
-    except Exception:
-        pass
-
-    data_sources = list(data) if data else []
-    manifest = ManifestConfig(
-        title=title or existing_title,
-        authors=author or existing_authors or [resolved_source_id],
+    """Update an existing published dataset (same as `mdf publish --update`)."""
+    _run_publish(
+        data=list(data or []),
+        title=title,
+        author=author,
         description=description,
-        data_sources=data_sources,
-        publisher=cfg.publisher,
-        organization=cfg.organization,
-    )
-    manifest.custom = {"mdf_source_id": resolved_source_id}
-
-    preflight = run_preflight(
-        manifest,
-        root=Path.cwd(),
-        service=resolved,
-        api_url=api_url or _api_url_for_service(resolved),
+        dry_run=dry_run,
+        test=False,
+        update=True,
+        update_id=source_id,
+        json_output=json_output,
+        preflight_only=preflight_only,
+        no_watch=no_watch,
+        service=service,
+        api_url=api_url,
         token=token,
         dev_user=dev_user,
-        submit=preflight_only or not dry_run,
     )
-
-    if preflight_only:
-        if json_output:
-            if not preflight.get("success"):
-                json_fail(
-                    kind="validation",
-                    message="Preflight found blocking issues",
-                    hint="fix the reported issues, then re-run with --preflight-only",
-                    extra={"preflight": preflight},
-                )
-            # Shape unchanged: --preflight-only has always emitted the
-            # preflight report itself (it already carries `success`).
-            json_ok(preflight)
-            return
-        _render_preflight(preflight, title="Update preflight")
-        if not preflight.get("success"):
-            raise typer.Exit(code=EXIT_USAGE)
-        return
-
-    if not preflight.get("success"):
-        if json_output:
-            json_fail(
-                kind="validation",
-                message="Update blocked by preflight issues",
-                hint="fix the reported issues, then re-run with --preflight-only",
-                extra={"preflight": preflight},
-            )
-        _render_preflight(preflight, title="Update preflight")
-        console.print()
-        console.print(theme.error_panel(
-            "Update blocked by preflight issues",
-            title="Blocked",
-            hint="fix the ✗ items above, then re-run with --preflight-only",
-        ))
-        raise typer.Exit(code=EXIT_USAGE)
-
-    agent = MDFAgent(root=None, manifest=manifest)
-    try:
-        payload = agent.build_submission(test=False, update=True)
-    except (RuntimeError, ValueError) as exc:
-        _abort_on_exception(
-            exc,
-            json_output=json_output,
-            title="Could not build the submission",
-            hint="fix the metadata, then re-run `mdf update`",
-            kind="validation",
-        )
-
-    if dry_run:
-        if json_output:
-            emit_json({"success": True, "dry_run": True, "payload": payload, "preflight": preflight})
-            return
-        _render_preflight(preflight, title="Update preflight")
-        target = api_url or _api_url_for_service(resolved)
-        console.print()
-        console.print(theme.rule("Dry run — would update"))
-        console.print(f"[label]Target:[/label] {escape(str(target))} [secondary]({escape(resolved)})[/secondary]")
-        console.print(f"[label]Source ID:[/label] {theme.ident(resolved_source_id)}")
-        console.print()
-        console.print(theme.json_syntax(payload))
-        return
-
-    transfer = theme.TransferProgress("Uploading", done_description="Upload complete")
-
-    try:
-        with transfer:
-            result = agent.publish(
-                test=False,
-                update=True,
-                dry_run=False,
-                token=token,
-                service_instance=resolved,
-                api_url=api_url,
-                dev_user_id=dev_user,
-                progress_callback=transfer.on_progress,
-                on_files_resolved=transfer.on_files_resolved,
-                on_file_done=transfer.on_file_done,
-            )
-    except RuntimeError as exc:
-        _abort_on_exception(
-            exc,
-            json_output=json_output,
-            title="Upload failed",
-            hint="check connectivity with `mdf config doctor`, then retry the update",
-        )
-
-    if json_output:
-        emit_json_result(result)
-        return
-
-    if result.get("success"):
-        new_version = result.get("version")
-        detail = theme.detail_table(label_width=11)
-        detail.add_row("Source ID", theme.ident(result.get("source_id")))
-        detail.add_row("Service", escape(str(resolved)))
-        detail.add_row("Status", format_status_badge("pending_curation"))
-        if new_version:
-            detail.add_row("Version", theme.ident(new_version))
-        console.print()
-        console.print(theme.success_panel(
-            detail,
-            title="Updated successfully!",
-            emoji=theme.PACKAGE,
-            subtitle="awaiting curation",
-        ))
-
-        if result.get("source_id"):
-            cfg = GlobalConfig()
-            cfg.record_publish(result.get("source_id"), new_version, resolved)
-            console.print(f"[hint]Try: mdf status {result.get('source_id')} | mdf show {result.get('source_id')}[/hint]")
-            if no_watch:
-                console.print(f"[hint]Watch: mdf status --watch {result.get('source_id')}[/hint]")
-            else:
-                raise typer.Exit(
-                    code=_watch_submission(
-                        result.get("source_id"),
-                        interval=5,
-                        timeout=1800,
-                        service=resolved,
-                        api_url=api_url,
-                        token=token,
-                        dev_user=dev_user,
-                        announce=True,
-                        stop_on_statuses={"pending_curation"},
-                    )
-                )
-    else:
-        require_success(result, error_prefix="Update failed")
 
 
 # ---------------------------------------------------------------------------
@@ -2955,8 +3080,7 @@ def import_external(
         table = theme.detail_table(label_width=12)
         table.add_row("Source", theme.ident(adapter.name()))
         table.add_row("Title", escape(str(metadata.get("title", ""))))
-        authors_str = ", ".join(a.get("name", "") for a in metadata.get("authors", []))
-        table.add_row("Authors", escape(authors_str))
+        table.add_row("Authors", escape(format_authors(metadata.get("authors"))))
         desc = metadata.get("description", "")
         if len(desc) > 200:
             desc = desc[:200] + "..."

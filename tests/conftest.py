@@ -12,3 +12,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # anything. This makes CI output match local (non-TTY) output.
 os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 os.environ["NO_COLOR"] = "1"
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_identity_lookup(monkeypatch):
+    """`status --auth`/`login` look up name+email over the network; tests never do.
+
+    Tests that exercise the lookup patch ``mdf.cli.main._fetch_identity`` themselves.
+    """
+    monkeypatch.setattr("mdf.cli.main._fetch_identity", lambda **kwargs: {})

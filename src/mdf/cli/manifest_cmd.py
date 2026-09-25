@@ -16,6 +16,7 @@ from rich.markup import escape
 from mdf.core.agent import MDFAgent
 from mdf.core.config import resolve_service
 from mdf.cli import theme
+from mdf.cli.formatting import format_authors
 from mdf.cli.preflight import suggest_data_sources
 from mdf.cli.theme import console
 
@@ -156,7 +157,7 @@ def manifest_init(
     detail = theme.detail_table(label_width=13)
     detail.add_row("Path", escape(str(resolved_path / "mdf.yaml")))
     detail.add_row("Title", escape(str(resolved_title)))
-    detail.add_row("Authors", escape(", ".join(resolved_authors)))
+    detail.add_row("Authors", escape(format_authors(resolved_authors)))
     if agent.manifest.data_sources:
         detail.add_row(
             "Data sources",
@@ -261,12 +262,6 @@ def manifest_inspect(
     preflight = run_preflight(manifest, root=root, service=resolve_service(None), submit=False)
 
     title = manifest.title[0] if isinstance(manifest.title, list) else manifest.title or "Untitled"
-    authors = []
-    for author in manifest.authors or []:
-        if isinstance(author, str):
-            authors.append(author)
-        else:
-            authors.append(author.name)
 
     console.print()
     console.print(theme.panel(
@@ -278,7 +273,7 @@ def manifest_inspect(
 
     table = theme.detail_table(label_width=14)
     table.add_row("Location", escape(str(manifest_path)))
-    table.add_row("Authors", escape(", ".join(authors)) or "None")
+    table.add_row("Authors", escape(format_authors(manifest.authors)) or "None")
     table.add_row("Publisher", escape(str(manifest.publisher or "None")))
     table.add_row("Organization", escape(str(manifest.organization or "None")))
     table.add_row("Keywords", escape(", ".join(manifest.subjects or [])) or "None")

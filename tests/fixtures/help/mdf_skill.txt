@@ -1,0 +1,14 @@
+
+ Usage: root skill [OPTIONS] COMMAND [ARGS]...
+
+ Install the packaged MDF agent skills (Claude, Codex, Gemini)
+
+   Options
+  --help          Show this message and exit.
+
+   Commands
+  install  Install a packaged MDF skill into your coding agent.
+  path     Print the location of a packaged skill bundle.
+  list     List the skill bundles shipped with mdf-cli.
+
+

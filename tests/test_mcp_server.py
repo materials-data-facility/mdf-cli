@@ -505,7 +505,9 @@ class TestMcpCliInstall:
             server = snippet["mcpServers"]["mdf"]
             assert server["args"][-2:] == ["mcp", "serve"]
             assert server["command"]
-            assert server["env"]["MDF_SERVICE"] == "staging"
+            # No --service: nothing pinned, so the server follows the CLI
+            # default (and follows it when the default flips to prod).
+            assert "MDF_SERVICE" not in server.get("env", {})
 
     def test_service_flag_is_pinned_in_the_snippet(self, monkeypatch):
         monkeypatch.setenv("MDF_SERVICE", "staging")

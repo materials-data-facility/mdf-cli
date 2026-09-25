@@ -15,6 +15,9 @@ Rules that outrank aesthetics:
   transfer UI render on :data:`err_console` so stdout stays parseable.
 * **Glyph vocabulary:** ``✓`` ok, ``✗`` failed, ``●`` in-progress/attention,
   ``○`` pending/skipped/empty. Emoji are limited to one per panel or headline.
+* **No box drawing off a terminal.** Panels, table rules and section rules are
+  decided at render time: on a TTY they draw; piped or redirected they degrade
+  to plain lines (title, then body), so ``mdf … > file`` holds text, not art.
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
 
 from rich import box
-from rich.console import Console, Group, RenderableType
+from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.live import Live
 from rich.markup import escape
 from rich.panel import Panel
@@ -207,6 +210,40 @@ def human_size(nbytes: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Terminal-only decoration
+# ---------------------------------------------------------------------------
+
+
+class _TerminalOnly:
+    """Render ``fancy`` on a terminal and ``plain`` everywhere else.
+
+    The choice is made per console at print time, so the same panel can draw
+    on a TTY stderr and stay plain text on a piped stdout.
+    """
+
+    def __init__(self, fancy: RenderableType, plain: RenderableType):
+        self.fancy = fancy
+        self.plain = plain
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        yield self.fancy if console.is_terminal else self.plain
+
+
+class _Table(Table):
+    """A :class:`rich.table.Table` that drops its rules off a terminal."""
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        if console.is_terminal or self.box is None:
+            yield from super().__rich_console__(console, options)
+            return
+        boxed, self.box = self.box, None
+        try:
+            yield from super().__rich_console__(console, options)
+        finally:
+            self.box = boxed
+
+
+# ---------------------------------------------------------------------------
 # Tables
 # ---------------------------------------------------------------------------
 
@@ -222,7 +259,7 @@ def table(
     kwargs.setdefault("header_style", "table.header")
     kwargs.setdefault("show_edge", False)
     kwargs.setdefault("pad_edge", False)
-    return Table(show_header=show_header, box=box_style, padding=padding, **kwargs)
+    return _Table(show_header=show_header, box=box_style, padding=padding, **kwargs)
 
 
 def detail_table(label_width: int = 15) -> Table:
@@ -246,18 +283,27 @@ def panel(
     border: str = "accent",
     title_style: str = "panel.title",
     padding: Tuple[int, int] = (0, 1),
-) -> Panel:
-    """A rounded panel: title in accent (left), subtitle dim (right)."""
-    return Panel(
+) -> RenderableType:
+    """A rounded panel: title in accent (left), subtitle dim (right).
+
+    Off a terminal it renders as plain lines instead: ``title  subtitle``,
+    then the body — no border.
+    """
+    title_markup = None if title is None else f"[{title_style}]{title}[/{title_style}]"
+    subtitle_markup = None if subtitle is None else f"[panel.subtitle]{subtitle}[/panel.subtitle]"
+    framed = Panel(
         body,
-        title=None if title is None else f"[{title_style}]{title}[/{title_style}]",
+        title=title_markup,
         title_align="left",
-        subtitle=None if subtitle is None else f"[panel.subtitle]{subtitle}[/panel.subtitle]",
+        subtitle=subtitle_markup,
         subtitle_align="right",
         border_style=border,
         box=box.ROUNDED,
         padding=padding,
     )
+    heading = "  ".join(part for part in (title_markup, subtitle_markup) if part)
+    plain = Group(heading, body) if heading else Group(body)
+    return _TerminalOnly(framed, plain)
 
 
 def success_panel(
@@ -266,7 +312,7 @@ def success_panel(
     title: str,
     subtitle: Optional[str] = None,
     emoji: Optional[str] = None,
-) -> Panel:
+) -> RenderableType:
     """A ``✓``-titled panel for completed work."""
     headline = f"{OK} {title}" if emoji is None else f"{OK} {emoji} {title}"
     return panel(body, title=headline, subtitle=subtitle, border="ok", title_style="ok")
@@ -280,7 +326,7 @@ def error_panel(
     detail: Optional[str] = None,
     hint: Optional[str] = None,
     border: str = "red",
-) -> Panel:
+) -> RenderableType:
     """A ``✗``-titled panel: CODE in the title, message in the body, ``hint:`` last.
 
     ``message``/``detail``/``hint`` must already be escaped when they carry
@@ -305,7 +351,7 @@ def empty_panel(
     *,
     title: str = "no results",
     hints: Sequence[str] = (),
-) -> Panel:
+) -> RenderableType:
     """The best-looking output in the CLI: a calm dim panel plus a way forward."""
     lines = [f"[secondary]{message}[/secondary]"]
     for hint in hints:
@@ -318,11 +364,14 @@ def empty_panel(
     )
 
 
-def rule(label: Optional[str] = None, *, style: str = "accent.soft") -> Rule:
-    """A section rule for walkthrough-style multi-section output."""
+def rule(label: Optional[str] = None, *, style: str = "accent.soft") -> RenderableType:
+    """A section rule for walkthrough-style multi-section output (a label line off a TTY)."""
     if label is None:
-        return Rule(style=style)
-    return Rule(f"[accent]{label}[/accent]", style=style, align="left")
+        return _TerminalOnly(Rule(style=style), "")
+    return _TerminalOnly(
+        Rule(f"[accent]{label}[/accent]", style=style, align="left"),
+        f"[accent]{label}[/accent]",
+    )
 
 
 # ---------------------------------------------------------------------------

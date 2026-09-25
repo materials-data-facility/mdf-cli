@@ -88,7 +88,7 @@ def test_https_put_verifies_tls_by_default(tmp_path: Path, monkeypatch: pytest.M
 def test_https_put_warns_when_tls_verification_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ):
     source = tmp_path / "data.csv"
     source.write_text("a,b\n1,2\n", encoding="utf-8")
@@ -100,8 +100,8 @@ def test_https_put_warns_when_tls_verification_disabled(
 
     agent_module._https_put_file(source, "/mdf_open/test/data.csv", "data-token")
 
-    captured = capsys.readouterr()
-    assert "MDF_SSL_VERIFY=false disables TLS certificate verification" in captured.err
+    # Core logs instead of printing (CLI-D1).
+    assert "MDF_SSL_VERIFY=false disables TLS certificate verification" in caplog.text
     assert _RecordingUploadClient.created_verify_values == [False]
 
 
@@ -157,9 +157,9 @@ def test_zip_archive_preserves_structure(tmp_path: Path):
 
 
 def test_zip_archive_skipped_over_size_limit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ):
-    """When total size exceeds limit, returns None and prints warning."""
+    """When total size exceeds limit, returns None and logs a warning."""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     (data_dir / "big.bin").write_bytes(b"x" * 100)
@@ -169,8 +169,7 @@ def test_zip_archive_skipped_over_size_limit(
     result = _create_zip_archive([(data_dir, "")])
     assert result is None
 
-    captured = capsys.readouterr()
-    assert "Skipping zip archive" in captured.err
+    assert "Skipping zip archive" in caplog.text
 
 
 def test_zip_archive_skipped_for_empty_dir(tmp_path: Path):

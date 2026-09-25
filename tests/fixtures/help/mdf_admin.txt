@@ -1,0 +1,19 @@
+
+ Usage: root admin [OPTIONS] COMMAND [ARGS]...
+
+ Curation and admin commands
+
+   Options
+  --help          Show this message and exit.
+
+   Commands
+  pending             List datasets awaiting curation.
+  approve             Approve a dataset for publication.
+  reject              Reject a dataset and return to submitter.
+  delete              Soft-delete a submission (curator-only).
+  stats               Show admin statistics (curator-only).
+  embedding-status    Show embedding coverage and snapshot info (curator-only).
+  rebuild-embeddings  Generate missing dataset embeddings and rebuild the semantic-search
+                      snapshot.
+
+

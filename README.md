@@ -77,8 +77,7 @@ For Claude Code, the snippet is the contents of `.mcp.json` in your project root
   "mcpServers": {
     "mdf": {
       "command": "/path/to/mdf",
-      "args": ["mcp", "serve"],
-      "env": { "MDF_SERVICE": "staging" }
+      "args": ["mcp", "serve"]
     }
   }
 }
@@ -106,7 +105,9 @@ stays a human action via `mdf publish` (or the `/mdf-publish` skill above).
 
 Service selection follows the CLI: `--service` / `--api-url` on `mdf mcp serve`,
 otherwise `MDF_API_URL`, `MDF_SERVICE`, then your `mdf config` default.
-`mdf mcp install` pins whichever it resolved into the snippet's `env`.
+`mdf mcp install` adds an `env` block only when you pass `--service` or
+`--api-url`; otherwise the server follows the CLI default (so it moves with the
+release default instead of staying pinned to today's service).
 
 Tools return compact JSON. Failures come back as
 `{"error": {"kind", "message", "hint"}}` using the same error vocabulary the CLI
@@ -117,11 +118,16 @@ prints, so an assistant can act on them instead of surfacing a traceback.
 ### Auth
 
 ```bash
-mdf login                     # Authenticate via Globus (opens browser)
+mdf login                     # Authenticate via Globus (opens browser); prints who you are
 mdf login --service staging   # Authenticate against staging
-mdf logout                    # Clear cached tokens
-mdf status --auth             # Show current auth status
+mdf login --token T --save    # Validate an access token and keep it for later commands
+mdf logout                    # Clear cached tokens (and a saved token)
+mdf status --auth             # Who you are, which service, and how you are authenticated
 ```
+
+Commands never start a login prompt unless a person can answer it: with
+`--json`, or when stdin/stdout is not a terminal, a missing login is an `auth`
+error (exit code 4, hint `mdf login`) instead. Login prompts go to stderr.
 
 ### Publishing datasets
 
@@ -136,10 +142,23 @@ mdf config manifest init --title "Title" --author "Name"  # Create mdf.yaml (non
 mdf publish --preflight-only                         # Run submit-time checks without submitting
 mdf publish --submit                                 # Submit to MDF
 
-# Update an existing dataset
-mdf publish --update --submit                        # Updates last published dataset
-mdf publish --update --title "New" --submit           # Update with metadata overrides
+# Update an existing dataset (publish a new version)
+mdf publish --update --submit                        # ID from mdf.yaml, else your last publish
+mdf publish --update my_dataset_id --submit          # Explicit ID (or DOI)
+mdf publish --update --title "New" --submit           # Metadata-only update with an override
+mdf publish --update my_dataset_id ./new_data/ --submit  # New files as well
 ```
+
+The first successful `mdf publish --submit` writes the dataset's `source_id`
+into `mdf.yaml`; that is how `--update` finds it later (a plain `--submit` on a
+published manifest is refused rather than creating a duplicate dataset).
+An update starts from the dataset's current metadata — description, keywords,
+license, funding, related works — and applies your changes (mdf.yaml fields and
+`--title`/`--author`/`--description`) on top. Without data paths (on the command
+line or in `mdf.yaml`) it is a metadata-only update that keeps the previous files.
+
+On the staging service (the public beta), submissions get DataCite **test** DOIs
+(prefix `10.23677`) that do not resolve on doi.org; `mdf publish --submit` says so.
 
 ### Manifest management
 
@@ -154,7 +173,8 @@ mdf config manifest inspect                   # Show a readable summary of the c
 ### Dataset utilities
 
 ```bash
-mdf dataset cite my_dataset_v1               # Citation (APA, BibTeX, RIS, DataCite)
+mdf dataset cite my_dataset_v1               # Citation (-f apa|bibtex|ris|datacite)
+mdf dataset cite my_dataset_v1 -f bibtex -o ref.bib  # Write it to a file (plain text when piped)
 mdf dataset open my_dataset_v1               # Open the dataset page in a browser
 mdf dataset preview my_dataset_v1            # File listing / data preview
 mdf dataset versions my_dataset_v1           # Version history table

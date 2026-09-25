@@ -22,11 +22,24 @@ def desktop_session(monkeypatch):
     # Patch the module's `sys` reference rather than the real sys.stdout:
     # pytest swaps sys.stdout between the setup and call phases, so a fixture
     # patching it directly would not survive into the test body.
-    monkeypatch.setattr(
-        globus_auth,
-        "sys",
-        SimpleNamespace(platform="darwin", stdout=SimpleNamespace(isatty=lambda: True)),
-    )
+    monkeypatch.setattr(globus_auth, "sys", _DesktopSys())
+
+
+class _DesktopSys:
+    """Stand-in for ``sys`` in globus.py: a TTY on a GUI platform.
+
+    ``stderr`` is looked up lazily because pytest swaps the real stream between
+    the setup and call phases; the login prompts are written there.
+    """
+
+    platform = "darwin"
+    stdout = SimpleNamespace(isatty=lambda: True)
+
+    @property
+    def stderr(self):
+        import sys
+
+        return sys.stderr
 
 
 class _FakeUserApp:
@@ -174,9 +187,11 @@ def test_honest_copy_printed_on_login(capsys, monkeypatch, tmp_path):
     token_path.write_text("{}")
 
     globus_auth.get_authorizer(token_path=token_path, no_browser=True)
-    out = capsys.readouterr().out
-    assert "Visit this URL, sign in, and paste the code:" in out
-    assert "Opening browser" not in out
+    captured = capsys.readouterr()
+    # The prompt is chrome: stderr only, so a caller's stdout stays clean.
+    assert "Visit this URL, sign in, and paste the code:" in captured.err
+    assert "Visit this URL" not in captured.out
+    assert "Opening browser" not in captured.err
 
 
 def test_honest_copy_printed_on_get_authorizer_for_scopes(capsys, monkeypatch, tmp_path):
@@ -197,9 +212,11 @@ def test_honest_copy_printed_on_get_authorizer_for_scopes(capsys, monkeypatch, t
         token_path=token_path,
         no_browser=True,
     )
-    out = capsys.readouterr().out
-    assert "Visit this URL, sign in, and paste the code:" in out
-    assert "Opening browser" not in out
+    captured = capsys.readouterr()
+    # The prompt is chrome: stderr only, so a caller's stdout stays clean.
+    assert "Visit this URL, sign in, and paste the code:" in captured.err
+    assert "Visit this URL" not in captured.out
+    assert "Opening browser" not in captured.err
 
 
 def test_browser_open_called_when_no_browser_false(monkeypatch, tmp_path, desktop_session):

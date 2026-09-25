@@ -1,0 +1,13 @@
+
+ Usage: root mcp [OPTIONS] COMMAND [ARGS]...
+
+ Model Context Protocol server for AI assistants
+
+   Options
+  --help          Show this message and exit.
+
+   Commands
+  serve    Run the MDF MCP server on stdio.
+  install  Print the MCP client config for the MDF server (does not edit any file).
+
+
