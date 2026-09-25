@@ -178,11 +178,27 @@ _LISTING_HTTP_TIMEOUT = 30
 DEFAULT_LISTING_TIMEOUT = 300
 
 
-class ResolvedFiles(NamedTuple):
-    files: List[tuple]
-    https_sources: List[str]
-    #: Sources whose scheme cannot be downloaded directly (e.g. ``http://``).
-    unsupported: List[str] = []
+class ResolvedFiles(list):
+    """The ``(https_url, relative_path)`` pairs, plus the sources that were not listed.
+
+    A ``list`` of the pairs, so it iterates exactly like the plain list
+    ``_resolve_globus_files`` returned in 0.2.0 (foundry depends on that).
+    """
+
+    def __init__(
+        self,
+        files: List[tuple],
+        https_sources: List[str],
+        unsupported: Optional[List[str]] = None,
+    ) -> None:
+        super().__init__(files)
+        self.https_sources = https_sources
+        #: Sources whose scheme cannot be downloaded directly (e.g. ``http://``).
+        self.unsupported = unsupported if unsupported is not None else []
+
+    @property
+    def files(self) -> List[tuple]:
+        return list(self)
 
 
 def _make_anonymous_client(

@@ -179,6 +179,18 @@ def test_resolve_globus_files_separates_https_sources():
     assert resolved.unsupported == ["http://example.org/ext_file2.json"]
 
 
+def test_resolve_globus_files_iterates_as_url_path_pairs():
+    """foundry does `for url, rel in _resolve_globus_files(...)`, the 0.2.0 list shape."""
+    ncsa_uuid = "82f1b5c6-6e9b-11e5-ba47-22000b92c6ec"
+    resolved = _resolve_globus_files(
+        [f"globus://{ncsa_uuid}/mdf_open/ds1/file.csv", "https://example.com/ext.csv"], ""
+    )
+    assert [(url, rel) for url, rel in resolved] == [
+        ("https://data.materialsdatafacility.org/mdf_open/ds1/file.csv", "file.csv")
+    ]
+    assert len(resolved) == 1
+
+
 def test_clone_https_sources_downloaded_directly(monkeypatch, tmp_path):
     downloaded_urls: List[tuple[str, Path]] = []
 
