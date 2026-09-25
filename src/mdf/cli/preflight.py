@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from mdf.auth.globus import is_logged_in
 from mdf.core.agent import _extract_doi, _resolve_doi
-from mdf.core.backend_client import BackendClient
+from mdf.core.backend_client import BackendClient, _api_url_for_service
 from mdf.core.config import load_saved_token, resolve_service
 from mdf.core.validation import validate_manifest
 from mdf.models.config import DataSource, ManifestConfig
@@ -69,7 +69,12 @@ def suggest_data_sources(root: Path, limit: int = 3) -> List[str]:
     return []
 
 
-def auth_ready(service: str, token: Optional[str] = None, dev_user: Optional[str] = None) -> bool:
+def auth_ready(
+    service: str,
+    token: Optional[str] = None,
+    dev_user: Optional[str] = None,
+    api_url: Optional[str] = None,
+) -> bool:
     normalized = resolve_service(service).strip().lower()
     if normalized == "local":
         return True
@@ -79,8 +84,11 @@ def auth_ready(service: str, token: Optional[str] = None, dev_user: Optional[str
         return True
     if os.environ.get("MDF_CLIENT_ID") and os.environ.get("MDF_CLIENT_SECRET"):
         return True
-    if load_saved_token():
-        return True
+    try:
+        if load_saved_token(api_url or _api_url_for_service(normalized)):
+            return True
+    except ValueError:  # unknown service: no saved token can apply
+        pass
     return is_logged_in(service_instance=normalized)
 
 
@@ -258,7 +266,7 @@ def run_preflight(
 
     service_target = api_url or os.environ.get("MDF_API_URL")
     if submit:
-        if not auth_ready(service, token=token, dev_user=dev_user):
+        if not auth_ready(service, token=token, dev_user=dev_user, api_url=api_url):
             _add_issue(
                 issues,
                 "blocking",

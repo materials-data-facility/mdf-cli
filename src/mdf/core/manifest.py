@@ -20,6 +20,10 @@ Example mdf.yaml::
 
 from __future__ import annotations
 
+import os
+import re
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
@@ -209,10 +213,27 @@ def manifest_from_metadata(metadata: Dict[str, Any]) -> ManifestConfig:
 
 
 def merge_manifests(base: ManifestConfig, overrides: ManifestConfig) -> ManifestConfig:
-    """Lay ``overrides`` over ``base``: every non-blank override field wins."""
+    """Lay ``overrides`` over ``base``.
+
+    Every field ``overrides`` sets explicitly wins — including an explicit empty
+    value (``subjects: []``, ``description: ""``, ``description:`` / null), which
+    clears what ``base`` had. Fields ``overrides`` never mentions keep ``base``'s
+    value. ``custom`` (user extensions) merges per key instead of replacing.
+
+    "Explicitly set" is pydantic's ``model_fields_set``: the keys present in the
+    mdf.yaml a manifest was loaded from, the kwargs it was built with, and any
+    attribute assigned since. Build flag-only overrides from the flags that were
+    actually given.
+    """
     merged = base.model_dump(exclude_none=True)
-    for key, value in overrides.model_dump(exclude_none=True).items():
-        if not _is_blank(value):
+    override_values = overrides.model_dump()
+    for key in overrides.model_fields_set:
+        value = override_values.get(key)
+        if value is None:
+            merged.pop(key, None)
+        elif key == "custom" and isinstance(value, dict) and value and isinstance(merged.get("custom"), dict):
+            merged["custom"] = {**merged["custom"], **value}
+        else:
             merged[key] = value
     if isinstance(merged.get("authors"), list):
         merged["authors"] = _normalize_authors(merged["authors"])
@@ -221,32 +242,50 @@ def merge_manifests(base: ManifestConfig, overrides: ManifestConfig) -> Manifest
     return ManifestConfig(**merged)
 
 
+_SOURCE_ID_LINE = re.compile(r"^source_id:[ \t]*(?:null|~|''|\"\")?[ \t]*(?:#.*)?$", re.MULTILINE)
+
+
 def write_source_id(path: Path, source_id: str) -> bool:
     """Record ``source_id`` in an existing mdf.yaml without rewriting the rest.
 
-    Appends one ``source_id:`` line, so comments and formatting survive, then
-    re-reads the file to prove it still parses to the same manifest plus the
-    id; otherwise the original text is restored. Returns True when written,
-    False when the file already names a source_id or could not be updated.
+    Replaces an empty ``source_id:`` line (null/blank) or appends one line, so
+    comments and formatting survive. The new text is validated — it must parse
+    to the same manifest plus the id — before it atomically replaces the file
+    (temp file in the same directory + ``os.replace``). Returns True when
+    written; False when the file already names a source_id or the edit could
+    not be made safely (the file is then untouched).
     """
     original = path.read_text(encoding="utf-8")
     data = yaml.safe_load(original) or {}
     if not isinstance(data, dict) or data.get("source_id"):
         return False
-    separator = "" if original.endswith("\n") or not original else "\n"
-    path.write_text(
-        f"{original}{separator}"
-        "# Set by `mdf publish`; `mdf publish --update` adds a version to this dataset.\n"
-        + yaml.safe_dump({"source_id": source_id}),
-        encoding="utf-8",
-    )
-    try:
-        written = yaml.safe_load(path.read_text(encoding="utf-8"))
-        ok = isinstance(written, dict) and written.get("source_id") == source_id and all(
-            written.get(key) == value for key, value in data.items()
+    line = yaml.safe_dump({"source_id": source_id}).rstrip("\n")
+    if "source_id" in data:
+        updated, count = _SOURCE_ID_LINE.subn(line, original, count=1)
+        if count != 1:
+            return False
+    else:
+        separator = "" if original.endswith("\n") or not original else "\n"
+        updated = (
+            f"{original}{separator}"
+            "# Set by `mdf publish`; `mdf publish --update` adds a version to this dataset.\n"
+            f"{line}\n"
         )
+    try:
+        parsed = yaml.safe_load(updated)
     except yaml.YAMLError:
-        ok = False
-    if not ok:
-        path.write_text(original, encoding="utf-8")
-    return ok
+        return False
+    expected = {**data, "source_id": source_id}
+    if parsed != expected:
+        return False
+
+    fd, tmp_name = tempfile.mkstemp(prefix=".mdf.yaml.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(updated)
+        os.chmod(tmp_name, stat.S_IMODE(path.stat().st_mode))
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    return True

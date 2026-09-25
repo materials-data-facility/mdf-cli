@@ -1,4 +1,4 @@
-"""Globus authentication for MDF Agent.
+"""Globus authentication for MDF CLI.
 
 This module provides authentication utilities for connecting to MDF Connect
 and related Globus services. It supports both token-based authentication
@@ -28,7 +28,7 @@ from mdf.core import config as core_config
 from mdf.core.exceptions import AuthRequired
 
 # =============================================================================
-# MDF Agent Credentials
+# MDF CLI Globus app credentials
 # =============================================================================
 
 # Native app client ID (registered at developers.globus.org)

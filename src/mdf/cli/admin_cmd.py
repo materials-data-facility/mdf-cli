@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Optional
 
 import typer
@@ -11,6 +10,7 @@ from rich.markup import escape
 from mdf.core.backend_client import BackendClient
 from mdf.core.config import resolve_service
 from mdf.cli import theme
+from mdf.cli.options import ApiUrlOpt, DevUserOpt, JsonOpt, ServiceOpt, TokenOpt, open_client
 from mdf.cli.formatting import (
     api_spinner,
     confirm_or_abort,
@@ -41,11 +41,11 @@ def _resolve_identifier_with_notice(
 def pending(
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
     organization: Optional[str] = typer.Option(None, "--organization", "-o", help="Filter by organization"),
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """List datasets awaiting curation.
 
@@ -54,15 +54,9 @@ def pending(
         mdf admin pending --organization argonne
     """
     resolved = resolve_service(service)
-    client = BackendClient.authenticated(
-        base_url=api_url,
-        token=token,
-        service_instance=resolved,
-        dev_user_id=dev_user,
-    )
-    with api_spinner("Loading pending..."):
-        result = client.curation_pending(limit=limit, organization=organization)
-    client.close()
+    with open_client(public=False, api_url=api_url, token=token, service=resolved, dev_user=dev_user) as client:
+        with api_spinner("Loading pending..."):
+            result = client.curation_pending(limit=limit, organization=organization)
 
     if json_output:
         emit_json_result(result)
@@ -111,11 +105,11 @@ def approve(
     notes: Optional[str] = typer.Option(None, "--notes", "-n", help="Curator notes"),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Dataset version"),
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt"),
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Approve a dataset for publication.
 
@@ -129,21 +123,15 @@ def approve(
         yes=yes,
         json_mode=json_output,
     )
-    client = BackendClient.authenticated(
-        base_url=api_url,
-        token=token,
-        service_instance=resolved,
-        dev_user_id=dev_user,
-    )
-    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
-    with api_spinner("Approving..."):
-        result = client.curation_approve(
-            source_id=source_id,
-            mint_doi=mint_doi,
-            notes=notes,
-            version=version,
-        )
-    client.close()
+    with open_client(public=False, api_url=api_url, token=token, service=resolved, dev_user=dev_user) as client:
+        source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
+        with api_spinner("Approving..."):
+            result = client.curation_approve(
+                source_id=source_id,
+                mint_doi=mint_doi,
+                notes=notes,
+                version=version,
+            )
 
     if json_output:
         emit_json_result(result)
@@ -170,11 +158,11 @@ def reject(
     suggestions: Optional[str] = typer.Option(None, "--suggestions", help="Suggestions for improvement"),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Dataset version"),
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt"),
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Reject a dataset and return to submitter.
 
@@ -187,21 +175,15 @@ def reject(
         yes=yes,
         json_mode=json_output,
     )
-    client = BackendClient.authenticated(
-        base_url=api_url,
-        token=token,
-        service_instance=resolved,
-        dev_user_id=dev_user,
-    )
-    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
-    with api_spinner("Rejecting..."):
-        result = client.curation_reject(
-            source_id=source_id,
-            reason=reason,
-            suggestions=suggestions,
-            version=version,
-        )
-    client.close()
+    with open_client(public=False, api_url=api_url, token=token, service=resolved, dev_user=dev_user) as client:
+        source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
+        with api_spinner("Rejecting..."):
+            result = client.curation_reject(
+                source_id=source_id,
+                reason=reason,
+                suggestions=suggestions,
+                version=version,
+            )
 
     if json_output:
         emit_json_result(result)
@@ -227,11 +209,11 @@ def delete_dataset(
     reason: str = typer.Option(..., "--reason", "-r", help="Deletion reason (required)"),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Target version"),
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt"),
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Soft-delete a submission (curator-only).
 
@@ -244,16 +226,10 @@ def delete_dataset(
         yes=yes,
         json_mode=json_output,
     )
-    client = BackendClient.authenticated(
-        base_url=api_url,
-        token=token,
-        service_instance=resolved,
-        dev_user_id=dev_user,
-    )
-    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
-    with api_spinner("Deleting..."):
-        result = client.delete_submission(source_id, reason=reason, version=version)
-    client.close()
+    with open_client(public=False, api_url=api_url, token=token, service=resolved, dev_user=dev_user) as client:
+        source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
+        with api_spinner("Deleting..."):
+            result = client.delete_submission(source_id, reason=reason, version=version)
 
     if json_output:
         emit_json_result(result)
@@ -275,11 +251,11 @@ def delete_dataset(
 
 @app.command()
 def stats(
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Show admin statistics (curator-only).
 
@@ -288,15 +264,9 @@ def stats(
         mdf admin stats --json
     """
     resolved = resolve_service(service)
-    client = BackendClient.authenticated(
-        base_url=api_url,
-        token=token,
-        service_instance=resolved,
-        dev_user_id=dev_user,
-    )
-    with api_spinner("Loading stats..."):
-        result = client.admin_stats()
-    client.close()
+    with open_client(public=False, api_url=api_url, token=token, service=resolved, dev_user=dev_user) as client:
+        with api_spinner("Loading stats..."):
+            result = client.admin_stats()
 
     if json_output:
         emit_json_result(result)
@@ -334,11 +304,11 @@ def stats(
 
 @app.command("embedding-status")
 def embedding_status(
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Show embedding coverage and snapshot info (curator-only).
 
@@ -346,15 +316,9 @@ def embedding_status(
         mdf admin embedding-status
     """
     resolved = resolve_service(service)
-    client = BackendClient.authenticated(
-        base_url=api_url,
-        token=token,
-        service_instance=resolved,
-        dev_user_id=dev_user,
-    )
-    with api_spinner("Loading embedding status..."):
-        result = client.embedding_status()
-    client.close()
+    with open_client(public=False, api_url=api_url, token=token, service=resolved, dev_user=dev_user) as client:
+        with api_spinner("Loading embedding status..."):
+            result = client.embedding_status()
 
     if json_output:
         emit_json_result(result)
@@ -414,11 +378,11 @@ def rebuild_embeddings(
         None, "--limit", help="Max records to embed in this run"
     ),
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt"),
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Generate missing dataset embeddings and rebuild the semantic-search snapshot.
 
@@ -433,17 +397,11 @@ def rebuild_embeddings(
     confirm_or_abort(msg, yes=yes, json_mode=json_output)
 
     resolved = resolve_service(service)
-    client = BackendClient.authenticated(
-        base_url=api_url,
-        token=token,
-        service_instance=resolved,
-        dev_user_id=dev_user,
-    )
-    with api_spinner("Enqueueing embedding jobs..."):
-        result = client.rebuild_embeddings(
-            force=force, build_snapshot=not no_snapshot, limit=limit
-        )
-    client.close()
+    with open_client(public=False, api_url=api_url, token=token, service=resolved, dev_user=dev_user) as client:
+        with api_spinner("Enqueueing embedding jobs..."):
+            result = client.rebuild_embeddings(
+                force=force, build_snapshot=not no_snapshot, limit=limit
+            )
 
     if json_output:
         emit_json_result(result)

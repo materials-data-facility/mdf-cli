@@ -122,6 +122,10 @@ class ManifestConfig(BaseModel):
                         entry["affiliations"] = a.affiliations
                     if a.orcid:
                         entry["orcid"] = a.orcid
+                    # Unknown author keys (e.g. identifiers inherited from a
+                    # published record) pass through untouched.
+                    for key, value in (a.model_extra or {}).items():
+                        entry.setdefault(key, value)
                     authors.append(entry)
                 else:
                     authors.append({"name": a})

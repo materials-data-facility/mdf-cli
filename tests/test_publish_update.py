@@ -87,7 +87,7 @@ def workdir(tmp_path, monkeypatch):
 @pytest.fixture
 def status_client(monkeypatch):
     client = _StatusClient()
-    monkeypatch.setattr("mdf.cli.main.BackendClient.authenticated", lambda **kwargs: client)
+    monkeypatch.setattr("mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: client)
     return client
 
 
@@ -218,14 +218,6 @@ def test_update_of_unknown_dataset_fails_with_not_found(workdir, status_client):
     assert json.loads(result.stdout)["error"]["kind"] == "not_found"
 
 
-def test_hidden_update_alias_uses_the_same_path(workdir, status_client):
-    result = runner.invoke(app, ["update", "ds_one", "--json"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)["payload"]
-    assert payload["source_id"] == "ds_one"
-    assert payload["description"] == "The original description."
-
-
 # ---------------------------------------------------------------------------
 # Submit: write-back, duplicate guard, staging notice
 # ---------------------------------------------------------------------------
@@ -233,10 +225,10 @@ def test_hidden_update_alias_uses_the_same_path(workdir, status_client):
 
 def _stub_submit(monkeypatch, response: Dict[str, Any]):
     monkeypatch.setattr(
-        "mdf.cli.main.run_preflight",
+        "mdf.cli.commands.publish.run_preflight",
         lambda *args, **kwargs: {"success": True, "issues": [], "source_summary": {}},
     )
-    monkeypatch.setattr("mdf.cli.main.MDFAgent.publish", lambda self, **kwargs: dict(response))
+    monkeypatch.setattr("mdf.core.agent.MDFAgent.publish", lambda self, **kwargs: dict(response))
 
 
 def test_first_publish_writes_source_id_back_and_warns_about_test_dois(workdir, monkeypatch):
@@ -268,3 +260,94 @@ def test_no_staging_notice_for_other_services(workdir, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert "10.23677" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (cross-family review of e20c3a1)
+# ---------------------------------------------------------------------------
+
+
+def test_update_ignores_mdf_yaml_data_sources_without_new_paths(workdir, status_client):
+    (workdir / "old_data").mkdir()
+    (workdir / "old_data" / "a.csv").write_text("x\n")
+    (workdir / "mdf.yaml").write_text("source_id: ds_one\ndata_sources:\n  - old_data\n")
+    payload = _dry_run_payload(["--update"])
+    assert payload["data_sources"] == []
+    assert payload["update_metadata_only"] is True
+
+
+def test_update_with_paths_still_applies_mdf_yaml(workdir, status_client):
+    (workdir / "new_data").mkdir()
+    (workdir / "new_data" / "a.csv").write_text("x\n")
+    (workdir / "mdf.yaml").write_text("source_id: ds_one\ndescription: From yaml\n")
+    payload = _dry_run_payload(["--update", "new_data", "--title", "Flag title"])
+    assert payload["description"] == "From yaml"  # previous <- mdf.yaml
+    assert payload["title"] == "Flag title"  # <- flags
+    assert payload["keywords"] == ["perovskite", "DFT"]  # inherited
+    assert payload["update_metadata_only"] is False
+
+
+def test_explicit_empty_values_in_mdf_yaml_clear_inherited_ones(workdir, status_client):
+    (workdir / "mdf.yaml").write_text(
+        "source_id: ds_one\nsubjects: []\nrelated_works: []\ndescription:\n"
+    )
+    payload = _dry_run_payload(["--update"])
+    assert "keywords" not in payload
+    assert "related_works" not in payload
+    assert "description" not in payload
+    assert payload["funding"] == PREVIOUS_MDATA["funding"]  # untouched keys stay
+
+
+def test_custom_extensions_merge_per_key(workdir, status_client):
+    (workdir / "mdf.yaml").write_text("source_id: ds_one\ncustom:\n  instrument: XRD\n")
+    payload = _dry_run_payload(["--update"])
+    assert payload["extensions"] == {"drafted_by": "agent", "instrument": "XRD"}
+
+
+def test_inherited_authors_keep_unknown_keys(workdir, monkeypatch):
+    mdata = dict(PREVIOUS_MDATA)
+    mdata["authors"] = [{"name": "Doe, Jane", "identifiers": [{"scheme": "ISNI", "id": "1"}]}]
+    client = _StatusClient(mdata=mdata)
+    monkeypatch.setattr("mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: client)
+    payload = _dry_run_payload(["--update", "ds_one"])
+    assert payload["authors"][0]["identifiers"] == [{"scheme": "ISNI", "id": "1"}]
+
+
+@pytest.mark.parametrize("raw", [None, "{not json", ""])
+def test_unreadable_previous_metadata_refuses_the_update(workdir, monkeypatch, raw):
+    class BadClient(_StatusClient):
+        def status(self, source_id, version=None):
+            submission = {"source_id": "ds_one", "version": "1.0"}
+            if raw is not None:
+                submission["dataset_mdata"] = raw
+            return ApiResult({"success": True, "submission": submission}, status_code=200)
+
+    monkeypatch.setattr("mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: BadClient())
+    result = runner.invoke(app, ["publish", "--update", "ds_one", "--json"])
+    assert result.exit_code == 5
+    assert json.loads(result.stdout)["error"]["kind"] == "server"
+
+
+def test_write_source_id_replaces_a_null_key_and_leaves_no_temp_files(tmp_path):
+    path = tmp_path / "mdf.yaml"
+    path.write_text("title: T\nsource_id: null  # filled in by mdf publish\nauthors:\n  - A\n")
+    assert write_source_id(path, "ds_one") is True
+    text = path.read_text()
+    assert text.count("source_id") == 1
+    assert yaml.safe_load(text) == {"title": "T", "source_id": "ds_one", "authors": ["A"]}
+    assert [p.name for p in tmp_path.iterdir()] == ["mdf.yaml"]
+
+
+def test_history_failure_does_not_fail_a_publish(workdir, monkeypatch):
+    (workdir / "mdf.yaml").write_text("title: T\nauthors:\n  - A\n")
+    (workdir / "data.csv").write_text("a\n1\n")
+    _stub_submit(monkeypatch, {"success": True, "source_id": "new_ds", "version": "1.0"})
+
+    def broken_history(self, *args, **kwargs):
+        raise OSError("read-only home")
+
+    monkeypatch.setattr("mdf.core.config.GlobalConfig.record_publish", broken_history)
+    result = runner.invoke(app, ["publish", "--submit", "--json"])
+    assert result.exit_code == 0, result.output
+    assert load_manifest(workdir / "mdf.yaml").source_id == "new_ds"
+    assert "read-only home" in result.stderr

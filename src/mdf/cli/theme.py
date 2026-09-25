@@ -200,6 +200,31 @@ def number(value: Any) -> str:
     return f"[value]{escape(str(value))}[/value]"
 
 
+def relative_time(iso: Any, *, now: Optional[float] = None) -> str:
+    """``3 days ago`` for an ISO-8601 timestamp; ``—`` when missing or unparseable."""
+    from datetime import datetime, timezone
+
+    if not iso:
+        return "—"
+    try:
+        stamp = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return str(iso)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    seconds = (now if now is not None else time.time()) - stamp.timestamp()
+    if seconds < 0:
+        return stamp.date().isoformat()
+    for limit, size, unit in (
+        (60, 1, "second"), (3600, 60, "minute"), (86400, 3600, "hour"),
+        (86400 * 30, 86400, "day"), (86400 * 365, 86400 * 30, "month"),
+    ):
+        if seconds < limit:
+            count = max(1, int(seconds // size))
+            return "just now" if unit == "second" else f"{count} {unit}{'s' if count != 1 else ''} ago"
+    return stamp.date().isoformat()
+
+
 def human_size(nbytes: float) -> str:
     """Format bytes as a short human-readable string."""
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -486,12 +511,15 @@ def checklist(lines: Iterable[str]) -> str:
 
 @contextmanager
 def spinner(message: str = "Working…"):
-    """Transient ``dots`` spinner on stderr. A no-op when there's no TTY."""
+    """Transient ``dots`` spinner on stderr. A no-op when there's no TTY.
+
+    Yields an ``update(text)`` callable for live progress ("Listing files… 120").
+    """
     if interactive():
-        with err_console.status(f"[secondary]{message}[/secondary]", spinner="dots"):
-            yield
+        with err_console.status(f"[secondary]{message}[/secondary]", spinner="dots") as status:
+            yield lambda text: status.update(f"[secondary]{escape(str(text))}[/secondary]")
     else:
-        yield
+        yield lambda text: None
 
 
 # ---------------------------------------------------------------------------

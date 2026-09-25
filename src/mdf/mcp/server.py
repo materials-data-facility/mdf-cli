@@ -24,12 +24,12 @@ Design notes:
 - **No network or config I/O at start-up.** The client is built on the first
   tool call, so launching the server is instant and offline-safe.
 - **stdout carries the MCP protocol and nothing else.** Rich consoles reached
-  through :mod:`mdf.cli.formatting` (and any stray library ``print``) are kept
+  through a CLI console (and any stray library ``print``) are kept
   off the protocol stream by a server-lifetime stdout guard; logs go to stderr.
 - **Tools never raise.** Expected failures (unknown source_id, dataset without a
   profile, network trouble) come back as ``{"error": {"kind", "message",
   "hint"}}`` classified by the CLI's own
-  :func:`~mdf.cli.formatting.classify_api_error`, so an agent sees the same
+  :func:`~mdf.core.errors.classify_api_error`, so an agent sees the same
   error vocabulary the CLI prints.
 - Import-safe without the ``mcp`` package: the tool functions and
   :data:`TOOL_SPECS` can be imported (and tested) with no MCP SDK installed;
@@ -96,7 +96,7 @@ def _stdout_guard():
 
     On a stdio MCP server anything written to stdout corrupts the protocol
     stream, and this process imports Rich consoles (via
-    :mod:`mdf.cli.formatting`) that are bound to stdout.
+    :mod:`mdf.cli.theme`) that are bound to stdout.
 
     Deliberately **not** per tool call: ``sys.stdout`` is process-global, so a
     per-call swap is unsafe under concurrency. Refcounted so nesting is
@@ -188,15 +188,16 @@ def _get_client():
 # ----------------------------------------------------------------------
 
 def _error(kind: str, message: str, hint: Optional[str] = None, **extra: Any) -> Dict[str, Any]:
-    """Build the tool error payload: ``{"error": {"kind", "message", "hint"}}``."""
+    """Build the tool error payload — the same envelope the CLI prints under ``--json``:
+    ``{"success": false, "error": {"kind", "message", "hint", ...}}``."""
     payload: Dict[str, Any] = {"kind": kind, "message": message, "hint": hint}
     payload.update({k: v for k, v in extra.items() if v is not None})
-    return {"error": payload}
+    return {"success": False, "error": payload}
 
 
 def _api_error(result: Any) -> Dict[str, Any]:
     """Classify a failed API result with the CLI's own error vocabulary."""
-    from mdf.cli.formatting import classify_api_error
+    from mdf.core.errors import classify_api_error
 
     info = classify_api_error(result)
     return _error(
@@ -234,7 +235,7 @@ def _preview_error(result: Any, source_id: str) -> Dict[str, Any]:
 
 
 def _is_success(result: Any) -> bool:
-    from mdf.cli.formatting import is_success
+    from mdf.core.errors import is_success
 
     return is_success(result)
 

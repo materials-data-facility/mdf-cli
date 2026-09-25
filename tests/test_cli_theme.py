@@ -151,7 +151,7 @@ class TestMachineOutputStaysPlain:
                     status_code=200,
                 )
 
-        monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: FakeClient())
+        monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: FakeClient())
         result = runner.invoke(app, ["search", "perovskite", "--json"])
         assert result.exit_code == 0
         assert "\x1b[" not in result.stdout
@@ -165,7 +165,7 @@ class TestMachineOutputStaysPlain:
             def search(self, query, search_type="all", limit=20, **kwargs):
                 return ApiResult({"query": query, "total": 0, "results": []}, status_code=200)
 
-        monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: FakeClient())
+        monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: FakeClient())
         result = runner.invoke(app, ["search", "unobtainium"])
         assert result.exit_code == 0
         assert "No results found for 'unobtainium'" in result.stdout
@@ -179,7 +179,7 @@ class TestMachineOutputStaysPlain:
             def search(self, query, search_type="all", limit=20, **kwargs):
                 return {"success": False, "error": "Connection failed after 4 attempts: refused"}
 
-        monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: FakeClient())
+        monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: FakeClient())
         result = runner.invoke(app, ["search", "perovskite"])
         assert "Search failed" in result.stdout
         assert "No results found" not in result.stdout
@@ -195,7 +195,7 @@ class TestPublishFlowRendering:
         (tmp_path / "data.csv").write_text("a,b\n1,2\n")
 
         monkeypatch.setattr(
-            "mdf.cli.main.run_preflight",
+            "mdf.cli.commands.publish.run_preflight",
             lambda *args, **kwargs: {
                 "success": True,
                 "issues": [],
@@ -218,7 +218,7 @@ class TestPublishFlowRendering:
                 resolved(1)
             return {"success": True, "source_id": "src-1", "version": "1.0"}
 
-        monkeypatch.setattr("mdf.cli.main.MDFAgent.publish", fake_publish)
+        monkeypatch.setattr("mdf.core.agent.MDFAgent.publish", fake_publish)
 
         result = runner.invoke(
             app,
@@ -243,7 +243,7 @@ class TestPublishFlowRendering:
         (tmp_path / "data.csv").write_text("a,b\n1,2\n")
 
         monkeypatch.setattr(
-            "mdf.cli.main.run_preflight",
+            "mdf.cli.commands.publish.run_preflight",
             lambda *args, **kwargs: {
                 "success": True,
                 "issues": [],
@@ -257,7 +257,7 @@ class TestPublishFlowRendering:
         def boom(self, **kwargs):
             raise RuntimeError("upload aborted at 40%")
 
-        monkeypatch.setattr("mdf.cli.main.MDFAgent.publish", boom)
+        monkeypatch.setattr("mdf.core.agent.MDFAgent.publish", boom)
 
         result = runner.invoke(
             app,

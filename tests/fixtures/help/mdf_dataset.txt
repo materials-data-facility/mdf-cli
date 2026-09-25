@@ -1,16 +1,13 @@
 
  Usage: root dataset [OPTIONS] COMMAND [ARGS]...
 
- Dataset utilities (cite, open, preview, versions, ...)
+ Manage your datasets: edit, withdraw, resubmit, diff, open
 
    Options
   --help          Show this message and exit.
 
    Commands
-  cite      Get citation for a dataset.
   open      Open a dataset in the browser.
-  preview   Preview a dataset's files and data.
-  versions  Show version history for a dataset.
   diff      Show metadata diff between two versions.
   edit      Edit metadata on a submission.
   withdraw  Withdraw a pending_curation submission.

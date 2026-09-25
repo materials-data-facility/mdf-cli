@@ -1,8 +1,7 @@
-"""Dataset utility subcommands: cite, open, preview, versions, diff, edit, withdraw, resubmit."""
+"""`mdf dataset edit|withdraw|resubmit|diff|open`, plus `cite` and `versions` (registered top-level)."""
 
 from __future__ import annotations
 
-import json
 import webbrowser
 from pathlib import Path
 from typing import List, Optional
@@ -13,6 +12,7 @@ from rich.markup import escape
 from mdf.core.backend_client import BackendClient
 from mdf.core.config import resolve_service
 from mdf.cli import theme
+from mdf.cli.options import ApiUrlOpt, DevUserOpt, JsonOpt, ServiceOpt, TokenOpt, open_client
 from mdf.cli.formatting import (
     EXIT_USAGE,
     api_spinner,
@@ -24,15 +24,13 @@ from mdf.cli.formatting import (
     interactive_stdin,
     is_success,
     json_fail,
-    json_ok,
-    read_client,
     require_success,
     resolve_identifier_with_notice,
     status_code_of,
 )
 
 app = typer.Typer(
-    help="Dataset utilities (cite, open, preview, versions, ...)",
+    help="Manage your datasets: edit, withdraw, resubmit, diff, open",
     no_args_is_help=True,
 )
 
@@ -89,7 +87,6 @@ CITATION_FORMATS = {
 }
 
 
-@app.command()
 def cite(
     source_id: str = typer.Argument(..., help="Dataset source ID"),
     format: str = typer.Option("apa", "--format", "-f", help="Citation format: apa, bibtex, ris, datacite"),
@@ -98,11 +95,11 @@ def cite(
     ),
     copy: bool = typer.Option(False, "--copy", help="Copy citation to clipboard"),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Dataset version"),
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Get citation for a dataset.
 
@@ -110,10 +107,10 @@ def cite(
     carries the citation text only.
 
     Examples:
-        mdf dataset cite my_dataset                       # APA format
-        mdf dataset cite my_dataset -f bibtex -o ref.bib  # BibTeX file for papers
-        mdf dataset cite my_dataset -f bibtex >> refs.bib # plain text when redirected
-        mdf dataset cite my_dataset --copy                # Copy to clipboard
+        mdf cite my_dataset                       # APA format
+        mdf cite my_dataset -f bibtex -o ref.bib  # BibTeX file for papers
+        mdf cite my_dataset -f bibtex >> refs.bib # plain text when redirected
+        mdf cite my_dataset --copy                # Copy to clipboard
     """
     format = (format or "").strip().lower()
     if format not in CITATION_FORMATS:
@@ -125,13 +122,10 @@ def cite(
         raise typer.Exit(code=EXIT_USAGE)
 
     resolved = resolve_service(service)
-    client = read_client(
-        api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output
-    )
-    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
-    with api_spinner("Fetching citation..."):
-        result = client.get_citation(source_id, format=format, version=version)
-    client.close()
+    with open_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output) as client:
+        source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
+        with api_spinner("Fetching citation..."):
+            result = client.get_citation(source_id, format=format, version=version)
 
     if json_output:
         emit_json_result(result)
@@ -172,10 +166,10 @@ def open_dataset(
     source_id: str = typer.Argument(..., help="Dataset source ID"),
     url: bool = typer.Option(False, "--url", help="Print URL instead of opening browser"),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Dataset version"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Open a dataset in the browser.
 
@@ -184,11 +178,10 @@ def open_dataset(
         mdf dataset open my_dataset_v1 --url
     """
     resolved = resolve_service(service)
-    client = read_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user)
-    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=url)
-    with api_spinner("Loading dataset..."):
-        result = client.get_card(source_id, version=version)
-    client.close()
+    with open_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user) as client:
+        source_id = _resolve_identifier_with_notice(client, source_id, json_mode=url)
+        with api_spinner("Loading dataset..."):
+            result = client.get_card(source_id, version=version)
 
     if not is_success(result):
         require_success(result, error_prefix="Open failed")
@@ -208,64 +201,29 @@ def open_dataset(
         webbrowser.open(target_url)
 
 
-@app.command()
-def preview(
-    source_id: str = typer.Argument(..., help="Dataset source ID"),
-    sample: bool = typer.Option(False, "--sample", help="Show tabular data sample"),
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
-):
-    """Preview a dataset's files and data.
+def is_missing_profile(result: dict) -> bool:
+    """A 404 that only means "no file profile yet" (most migrated records).
 
-    Examples:
-        mdf dataset preview my_dataset_v1
-        mdf dataset preview my_dataset_v1 --sample
+    That is an expected empty state, not a failure — unlike a 404 for a
+    nonexistent dataset, which keeps normal error handling.
     """
-    resolved = resolve_service(service)
-    client = read_client(
-        api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output
-    )
-    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
+    text = str(result.get("detail") or result.get("error") or "").lower()
+    return status_code_of(result) == 404 and "profile" in text
 
-    if sample:
-        with api_spinner("Loading sample..."):
-            result = client.dataset_sample(source_id)
-    else:
-        with api_spinner("Loading preview..."):
-            result = client.dataset_preview(source_id)
-    client.close()
 
-    # A missing profile is an expected state, not a failure: most migrated
-    # records have no generated profile yet, so the API 404s with "No profile
-    # found". Only that specific 404 is friendly — a 404 for a nonexistent
-    # dataset (typo'd source_id) must keep normal error handling.
-    _payload_text = str(result.get("detail") or result.get("error") or "").lower()
-    if status_code_of(result) == 404 and "profile" in _payload_text:
-        # Expected empty state, not a failure: `success: true`, exit 0.
-        if json_output:
-            json_ok(result)
-            return
+def render_files(result: dict, source_id: str, *, sample: bool = False) -> None:
+    """Render ``GET /preview/{id}`` (file list) or ``/preview/{id}/sample`` for humans."""
+    if is_missing_profile(result):
         console.print()
         console.print(theme.empty_panel(
             "No file profile exists for this dataset\n"
             "(profiles are not yet generated for migrated records).",
             title="no profile",
-            hints=[
-                f"mdf show {source_id} — for metadata",
-                f"mdf clone {source_id} — to download the files",
-            ],
+            hints=[f"mdf clone {source_id} --plan --files — to list the files from storage"],
         ))
         return
-
-    if json_output:
-        emit_json_result(result)
-        return
-
     if not is_success(result):
-        require_success(result, error_prefix="Preview failed")
+        require_success(result, error_prefix="Could not load the file list")
 
     if sample:
         rows = result.get("rows") or result.get("data", [])
@@ -275,7 +233,7 @@ def preview(
             console.print(theme.empty_panel(
                 "No sample data available.",
                 title="no sample",
-                hints=[f"list the files instead: `mdf dataset preview {source_id}`"],
+                hints=[f"list the files instead: `mdf show {source_id} --files`"],
             ))
             return
         if not columns and rows:
@@ -294,57 +252,53 @@ def preview(
         console.print(table)
         if len(rows) > 20:
             console.print(f"[secondary]... and {len(rows) - 20} more rows[/secondary]")
-    else:
-        files = result.get("files", result.get("data_sources", []))
-        if not files:
-            console.print()
-            console.print(theme.empty_panel(
-                "No file information available.",
-                title="no files",
-                hints=[f"see the metadata with `mdf show {source_id}`"],
-            ))
-            return
-        console.print(f"\n[bold]Files[/bold] [secondary]({len(files)})[/secondary]\n")
-        table = theme.table()
-        table.add_column("Name", max_width=50)
-        table.add_column("Size", style="value", no_wrap=True, justify="right")
-        table.add_column("Type", style="secondary", no_wrap=True)
-        for f in files:
-            name = f.get("filename") or f.get("name") or f.get("path", "?")
-            size = f.get("size") or f.get("length", "")
-            if isinstance(size, (int, float)) and size > 0:
-                size = _human_size(size)
-            else:
-                size = str(size) if size else ""
-            ftype = f.get("mime_type") or f.get("type") or ""
-            table.add_row(escape(str(name)), escape(str(size)), escape(str(ftype)))
-        console.print(table)
+        return
+
+    files = result.get("files", result.get("data_sources", []))
+    if not files:
+        console.print()
+        console.print(theme.empty_panel("No file information available.", title="no files"))
+        return
+    console.print(f"\n[bold]Files[/bold] [secondary]({len(files)})[/secondary]\n")
+    table = theme.table()
+    table.add_column("Name", max_width=60, overflow="fold")
+    table.add_column("Size", style="value", no_wrap=True, justify="right")
+    table.add_column("Type", style="secondary", no_wrap=True)
+    for f in files:
+        if not isinstance(f, dict):
+            table.add_row(escape(str(f)), "", "")
+            continue
+        name = f.get("filename") or f.get("name") or f.get("path", "?")
+        size = f.get("size") or f.get("length", "")
+        if isinstance(size, (int, float)) and size > 0:
+            size = _human_size(size)
+        else:
+            size = str(size) if size else "—"
+        ftype = f.get("mime_type") or f.get("type") or "—"
+        table.add_row(escape(str(name)), escape(str(size)), escape(str(ftype)))
+    console.print(table)
 
 
-@app.command()
 def versions(
     source_id: str = typer.Argument(..., help="Dataset source ID"),
     limit: int = typer.Option(50, "--limit", "-n", help="Max versions to return"),
     offset: int = typer.Option(0, "--offset", help="Skip first N versions"),
-    json_output: bool = typer.Option(False, "--json", help="Raw JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Show version history for a dataset.
 
     Examples:
-        mdf dataset versions my_dataset_v1
+        mdf versions my_dataset_v1
     """
     resolved = resolve_service(service)
-    client = read_client(
-        api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output
-    )
-    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
-    with api_spinner("Loading versions..."):
-        result = client.versions(source_id, limit=limit, offset=offset)
-    client.close()
+    with open_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output) as client:
+        source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
+        with api_spinner("Loading versions..."):
+            result = client.versions(source_id, limit=limit, offset=offset)
 
     if json_output:
         emit_json_result(result)
@@ -390,10 +344,13 @@ def versions(
     dataset_doi = result.get("dataset_doi")
     if dataset_doi:
         console.print(f"\n[label]Dataset DOI:[/label] https://doi.org/{escape(str(dataset_doi))}")
-    console.print(
-        f"[hint]Next: mdf show {source_id} | mdf dataset diff {source_id} "
-        f"--from 1.0 --to {version_list[-1].get('version', '1.0')}[/hint]"
-    )
+    next_steps = [f"mdf show {source_id}"]
+    if len(version_list) > 1:
+        next_steps.append(
+            f"mdf dataset diff {source_id} --from {version_list[0].get('version')} "
+            f"--to {version_list[-1].get('version')}"
+        )
+    console.print(f"[hint]Next: {'  ·  '.join(next_steps)}[/hint]")
     console.print()
 
 
@@ -402,11 +359,11 @@ def diff(
     source_id: str = typer.Argument(..., help="Dataset source ID"),
     from_version: str = typer.Option(..., "--from", help="From version"),
     to_version: str = typer.Option(..., "--to", help="To version"),
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Show metadata diff between two versions.
 
@@ -414,13 +371,10 @@ def diff(
         mdf dataset diff my_dataset_v1 --from 1.0 --to 2.0
     """
     resolved = resolve_service(service)
-    client = read_client(
-        api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output
-    )
-    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
-    with api_spinner("Loading diff..."):
-        result = client.version_diff(source_id, from_version, to_version)
-    client.close()
+    with open_client(api_url=api_url, token=token, service=resolved, dev_user=dev_user, json_mode=json_output) as client:
+        source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
+        with api_spinner("Loading diff..."):
+            result = client.version_diff(source_id, from_version, to_version)
 
     if json_output:
         emit_json_result(result)
@@ -471,11 +425,11 @@ def edit(
     description: Optional[str] = typer.Option(None, "--description", "-d", help="New description"),
     keywords: Optional[List[str]] = typer.Option(None, "--keyword", "-k", help="Keywords (repeatable)"),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Target version"),
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Edit metadata on a submission.
 
@@ -484,12 +438,6 @@ def edit(
         mdf dataset edit my_dataset_v1 --keyword "XRD" --keyword "diffraction"
     """
     resolved = resolve_service(service)
-    client = BackendClient.authenticated(
-        base_url=api_url,
-        token=token,
-        service_instance=resolved,
-        dev_user_id=dev_user,
-    )
     fields = {}
     if title is not None:
         fields["title"] = title
@@ -502,7 +450,6 @@ def edit(
         message = "No fields provided to edit."
         hint = "use --title, --description, or --keyword"
         if json_output:
-            client.close()
             json_fail(kind="validation", message=message, hint=hint)
         console.print(theme.error_panel(
             message,
@@ -511,9 +458,9 @@ def edit(
         ))
         raise typer.Exit(code=EXIT_USAGE)
 
-    with api_spinner("Editing metadata..."):
-        result = client.edit_metadata(source_id, version=version, **fields)
-    client.close()
+    with open_client(public=False, api_url=api_url, token=token, service=resolved, dev_user=dev_user) as client:
+        with api_spinner("Editing metadata..."):
+            result = client.edit_metadata(source_id, version=version, **fields)
 
     if json_output:
         emit_json_result(result)
@@ -538,11 +485,11 @@ def withdraw(
     reason: Optional[str] = typer.Option(None, "--reason", "-r", help="Withdrawal reason"),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Target version"),
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt"),
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Withdraw a pending_curation submission.
 
@@ -556,16 +503,10 @@ def withdraw(
         yes=yes,
         json_mode=json_output,
     )
-    client = BackendClient.authenticated(
-        base_url=api_url,
-        token=token,
-        service_instance=resolved,
-        dev_user_id=dev_user,
-    )
-    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
-    with api_spinner("Withdrawing..."):
-        result = client.withdraw(source_id, reason=reason or "", version=version)
-    client.close()
+    with open_client(public=False, api_url=api_url, token=token, service=resolved, dev_user=dev_user) as client:
+        source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
+        with api_spinner("Withdrawing..."):
+            result = client.withdraw(source_id, reason=reason or "", version=version)
 
     if json_output:
         emit_json_result(result)
@@ -590,11 +531,11 @@ def resubmit(
     notes: Optional[str] = typer.Option(None, "--notes", "-n", help="Notes for the curator"),
     version: Optional[str] = typer.Option(None, "--version", "-v", help="Target version"),
     yes: bool = typer.Option(False, "--yes", help="Skip confirmation prompt"),
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
-    token: Optional[str] = typer.Option(None, "--token", help="Globus access token"),
-    dev_user: Optional[str] = typer.Option(None, "--dev-user", help="Dev-mode user id"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
+    token: TokenOpt = None,
+    dev_user: DevUserOpt = None,
 ):
     """Resubmit a rejected dataset back to the curation queue.
 
@@ -610,16 +551,10 @@ def resubmit(
         yes=yes,
         json_mode=json_output,
     )
-    client = BackendClient.authenticated(
-        base_url=api_url,
-        token=token,
-        service_instance=resolved,
-        dev_user_id=dev_user,
-    )
-    source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
-    with api_spinner("Resubmitting..."):
-        result = client.resubmit(source_id, notes=notes or "", version=version)
-    client.close()
+    with open_client(public=False, api_url=api_url, token=token, service=resolved, dev_user=dev_user) as client:
+        source_id = _resolve_identifier_with_notice(client, source_id, json_mode=json_output)
+        with api_spinner("Resubmitting..."):
+            result = client.resubmit(source_id, notes=notes or "", version=version)
 
     if json_output:
         emit_json_result(result)

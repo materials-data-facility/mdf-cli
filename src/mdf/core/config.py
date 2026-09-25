@@ -1,4 +1,4 @@
-"""Global configuration for MDF Agent CLI.
+"""Global configuration for MDF CLI CLI.
 
 Persists user defaults and last-publish state to ~/.config/mdf/config.json.
 """
@@ -145,40 +145,77 @@ def resolve_service(explicit: Optional[str]) -> str:
 
 
 def saved_token_path() -> Path:
-    """Where ``mdf login --token --save`` keeps a raw access token (mode 0600).
+    """Where ``mdf login --token --save`` keeps access tokens (mode 0600).
 
-    Deliberately separate from ``config.json`` (which ``mdf config show``
-    prints) and from the Globus token store (``tokens.json``, owned by
-    globus_sdk and keyed by resource server).
+    A JSON object mapping an API base URL to the token saved for it, so a token
+    is only ever sent to the service it was validated against. Deliberately
+    separate from ``config.json`` (which ``mdf config show`` prints) and from
+    the Globus token store (``tokens.json``, owned by globus_sdk).
     """
-    return _default_config_path().parent / "access_token"
+    return _default_config_path().parent / "access_tokens.json"
 
 
-def load_saved_token() -> Optional[str]:
-    """The saved access token, or None when there is none (or it is unreadable)."""
-    path = saved_token_path()
+def _token_key(base_url: str) -> str:
+    return str(base_url or "").strip().rstrip("/").lower()
+
+
+def _read_saved_tokens() -> dict:
     try:
-        token = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return token or None
+        data = json.loads(saved_token_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
-def save_token(token: str) -> Path:
-    """Persist ``token`` for later CLI/SDK calls, readable by the owner only."""
+def _write_saved_tokens(tokens: dict) -> Path:
+    """Atomically replace the saved-token file (owner-only), never via a symlink."""
     path = saved_token_path()
+    if path.is_symlink():
+        raise OSError(f"Refusing to write saved tokens through a symlink: {path}")
+    if not tokens:
+        if path.exists():
+            path.unlink()
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(token.strip() + "\n")
-    os.chmod(path, 0o600)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(tokens, handle, indent=2)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return path
 
 
-def clear_saved_token() -> bool:
-    """Delete the saved access token. Returns True if one existed."""
-    path = saved_token_path()
-    if path.exists():
-        path.unlink()
-        return True
-    return False
+def load_saved_token(base_url: str) -> Optional[str]:
+    """The token saved for the API at ``base_url``, or None.
+
+    Never falls back to a token saved for another service.
+    """
+    token = _read_saved_tokens().get(_token_key(base_url))
+    return str(token).strip() or None if token else None
+
+
+def save_token(token: str, base_url: str) -> Path:
+    """Persist ``token`` for the API at ``base_url``, readable by the owner only."""
+    tokens = _read_saved_tokens()
+    tokens[_token_key(base_url)] = token.strip()
+    return _write_saved_tokens(tokens)
+
+
+def clear_saved_token(base_url: Optional[str] = None) -> bool:
+    """Forget the token for ``base_url`` (all saved tokens when None). True if any existed."""
+    tokens = _read_saved_tokens()
+    if base_url is None:
+        existed = bool(tokens)
+        tokens = {}
+    else:
+        existed = tokens.pop(_token_key(base_url), None) is not None
+    _write_saved_tokens(tokens)
+    return existed

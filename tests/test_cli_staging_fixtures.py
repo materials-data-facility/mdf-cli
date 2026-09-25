@@ -63,8 +63,7 @@ class RecordedStaging:
 @pytest.fixture(autouse=True)
 def recorded_staging(monkeypatch):
     client = RecordedStaging()
-    for module in ("mdf.cli.main", "mdf.cli.dataset_cmd"):
-        monkeypatch.setattr(f"{module}.read_client", lambda **kwargs: client)
+    monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: client)
     return client
 
 
@@ -112,7 +111,7 @@ def test_show_unknown_id_is_not_found():
 def test_cite_piped_is_the_raw_citation(fmt):
     source_id = IDS[0]
     expected = fixture(f"citation_{source_id}")[fmt].rstrip("\n")
-    result = runner.invoke(app, ["dataset", "cite", source_id, "-f", fmt])
+    result = runner.invoke(app, ["cite", source_id, "-f", fmt])
     assert result.exit_code == 0, result.output
     assert result.stdout == expected + "\n"
 
@@ -120,7 +119,7 @@ def test_cite_piped_is_the_raw_citation(fmt):
 def test_cite_writes_a_file(tmp_path):
     source_id = IDS[0]
     out = tmp_path / "ref.bib"
-    result = runner.invoke(app, ["dataset", "cite", source_id, "-f", "bibtex", "-o", str(out)])
+    result = runner.invoke(app, ["cite", source_id, "-f", "bibtex", "-o", str(out)])
     assert result.exit_code == 0, result.output
     assert out.read_text() == fixture(f"citation_{source_id}")["bibtex"].rstrip("\n") + "\n"
     assert result.stdout == ""
@@ -128,7 +127,7 @@ def test_cite_writes_a_file(tmp_path):
 
 @pytest.mark.parametrize("extra", [[], ["--json"]])
 def test_cite_rejects_unknown_formats(extra):
-    result = runner.invoke(app, ["dataset", "cite", IDS[0], "-f", "nonsense", *extra])
+    result = runner.invoke(app, ["cite", IDS[0], "-f", "nonsense", *extra])
     assert result.exit_code == 2
     if extra:
         assert json.loads(result.stdout)["error"]["kind"] == "validation"
@@ -142,10 +141,10 @@ def test_cite_rejects_unknown_formats(extra):
 @pytest.mark.parametrize("source_id", IDS)
 def test_versions(source_id):
     recorded = fixture(f"versions_{source_id}")
-    human = runner.invoke(app, ["dataset", "versions", source_id])
+    human = runner.invoke(app, ["versions", source_id])
     assert human.exit_code == 0, human.output
     assert recorded["dataset_doi"] in human.stdout
-    payload = json.loads(runner.invoke(app, ["dataset", "versions", source_id, "--json"]).stdout)
+    payload = json.loads(runner.invoke(app, ["versions", source_id, "--json"]).stdout)
     assert payload["versions"] == recorded["versions"]
 
 

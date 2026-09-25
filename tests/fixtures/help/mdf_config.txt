@@ -1,17 +1,15 @@
 
  Usage: root config [OPTIONS] COMMAND [ARGS]...
 
- Manage configuration
+ Show and change CLI defaults (~/.config/mdf/config.json)
 
    Options
   --help          Show this message and exit.
 
    Commands
-  show      Show current configuration.
-  set       Set a configuration value.
-  get       Get a configuration value.
-  path      Show configuration file path.
-  doctor    Run diagnostics on your MDF Agent setup.
-  manifest  Manage mdf.yaml manifest files
+  show  Show current configuration.
+  set   Set a configuration value.
+  get   Get a configuration value.
+  path  Show configuration file path.
 
 

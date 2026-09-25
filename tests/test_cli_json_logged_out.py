@@ -12,8 +12,6 @@ The commands run inside one child process: the Globus token path is resolved
 from ``HOME`` at import time, so an isolated ``HOME`` needs a fresh
 interpreter, and one interpreter keeps the test fast.
 
-The hidden ``backend`` and ``stream`` groups are excluded: they are dev
-surfaces scheduled for deletion (CLI-D4) and never promised the contract.
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ import typer
 
 from mdf.cli.main import app
 
-EXCLUDED_GROUPS = {"backend", "stream"}
+EXCLUDED_GROUPS: set = set()
 ALLOWED_EXIT_CODES = {0, 2, 3, 4, 5}
 PROMPT_MARKERS = ("Visit this URL", "Authorization Code", "Please authenticate with Globus")
 
@@ -115,7 +113,7 @@ def logged_out_runs(tmp_path_factory) -> Dict[str, dict]:
 def test_the_tree_has_json_commands():
     names = {name for name, _ in COMMANDS}
     # Guard the walker itself: these must always be covered.
-    assert {"list", "show", "search", "status", "publish", "dataset cite", "admin stats"} <= names
+    assert {"list", "show", "search", "status", "publish", "check", "cite", "whoami", "doctor", "admin stats"} <= names
 
 
 @pytest.mark.parametrize("name", [name for name, _ in COMMANDS])
@@ -134,7 +132,7 @@ def test_json_command_logged_out(name, logged_out_runs):
         assert marker not in run["stdout"] + run["stderr"], f"{name} tried to prompt"
 
 
-@pytest.mark.parametrize("name", ["list", "admin stats", "admin pending", "whoami", "dataset edit"])
+@pytest.mark.parametrize("name", ["list", "admin stats", "admin pending", "whoami", "clone"])
 def test_auth_gated_commands_exit_4_with_login_hint(name, logged_out_runs):
     run = logged_out_runs[name]
     payload = json.loads(run["stdout"])

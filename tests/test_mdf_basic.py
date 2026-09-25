@@ -302,7 +302,7 @@ def test_resolve_globus_files_directory_uri(monkeypatch: pytest.MonkeyPatch):
         return FakeListing([])
 
     class FakeTC:
-        def __init__(self, authorizer=None):
+        def __init__(self, authorizer=None, **kwargs):
             pass
         operation_ls = staticmethod(fake_operation_ls)
 

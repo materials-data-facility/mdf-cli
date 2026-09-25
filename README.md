@@ -1,6 +1,6 @@
-# MDF Agent
+# MDF CLI
 
-Python client and CLI for the [MDF Connect v2](https://github.com/materials-data-facility/connect_server) backend. Submit datasets, stream data from automated labs, curate submissions, and search the Materials Data Facility.
+Python client and CLI for the [MDF Connect v2](https://github.com/materials-data-facility/connect_server) backend. Find, cite and download datasets, publish your own, curate submissions, and search the Materials Data Facility.
 
 ## Install
 
@@ -22,24 +22,32 @@ See [Development](#development) below for an editable/source install.
 ## Quick start
 
 ```bash
-# Authenticate with Globus
-mdf login
+# Find and reuse data (no login needed for public datasets)
+mdf search "perovskite"
+mdf show bennett_origin_metalinsulator_metals --cite
+mdf cite bennett_origin_metalinsulator_metals -f bibtex -o ref.bib
+mdf clone bennett_origin_metalinsulator_metals --plan
 
-# Publish a dataset directly (one command)
-mdf publish ./data/ --title "My Dataset" --author "Jane Doe" --submit
+# Publish your own
+mdf login                       # sign in with Globus
+mdf init ./data                 # create mdf.yaml (asks on a terminal; flags otherwise)
+cd ./data
+mdf check                       # everything `publish --submit` checks, without uploading
+mdf publish --submit            # send it for curation; writes source_id into mdf.yaml
 
-# Or use a manifest for persistent metadata
-mdf setup                       # interactive: configure defaults + create mdf.yaml
-vim mdf.yaml                    # edit metadata, add data_sources
-mdf publish --submit
+# Follow up
+mdf status                      # your last publish
+mdf list                        # your datasets
+```
 
-# Check status
-mdf status
+The command tree:
 
-# Browse your datasets
-mdf list
-mdf show my_dataset_v1
-mdf dataset versions my_dataset_v1
+```
+Get started   login · logout · whoami · init [PATH] · doctor
+Find & reuse  search [Q] · show ID [--files] [--cite] · cite ID [-f] [-o] · clone ID [DIR] [--plan] · related ID · versions ID
+Publish       check · publish [--submit] [--update [ID]] · status [ID] [--watch] · list [--all] · import DOI|zenodo:N
+Manage        dataset edit|withdraw|resubmit|diff|open
+More          admin … · config show|get|set|path · manifest discover|inspect · skill … · mcp …
 ```
 
 ## Agent skill
@@ -53,8 +61,8 @@ mdf skill install --agent codex      # or codex / gemini / all
 mdf skill install --project          # into ./.claude/skills/ instead
 ```
 
-Then invoke `/mdf-publish` from the target agent. See `src/mdf/skill/skill.md`
-for the full list of handler actions it exposes.
+Then invoke `/mdf-publish` from the target agent. The skill's instructions live in
+`src/mdf/skills/mdf-publish/SKILL.md`.
 
 ## AI assistants (MCP)
 
@@ -110,7 +118,7 @@ otherwise `MDF_API_URL`, `MDF_SERVICE`, then your `mdf config` default.
 release default instead of staying pinned to today's service).
 
 Tools return compact JSON. Failures come back as
-`{"error": {"kind", "message", "hint"}}` using the same error vocabulary the CLI
+`{"success": false, "error": {"kind", "message", "hint"}}`, the same envelope and vocabulary the CLI
 prints, so an assistant can act on them instead of surfacing a traceback.
 
 ## CLI commands
@@ -121,9 +129,13 @@ prints, so an assistant can act on them instead of surfacing a traceback.
 mdf login                     # Authenticate via Globus (opens browser); prints who you are
 mdf login --service staging   # Authenticate against staging
 mdf login --token T --save    # Validate an access token and keep it for later commands
-mdf logout                    # Clear cached tokens (and a saved token)
-mdf status --auth             # Who you are, which service, and how you are authenticated
+mdf logout                    # Clear cached tokens (and saved tokens)
+mdf whoami                    # Who you are, which service, and how you are authenticated
+mdf doctor                    # Check service, connectivity, login and the local mdf.yaml
 ```
+
+A token saved with `--save` is used only for the service (API URL) it was
+validated against, and only when there is no cached Globus login.
 
 Commands never start a login prompt unless a person can answer it: with
 `--json`, or when stdin/stdout is not a terminal, a missing login is an `auth`
@@ -137,9 +149,9 @@ mdf publish ./data/ --title "My Dataset" --author "Jane" --submit
 mdf publish ./data/ --title "My Dataset" --author "Jane" --dry-run  # Preview payload (default)
 
 # Manifest mode (mdf.yaml in current directory)
-mdf setup                                            # Create mdf.yaml (interactive)
-mdf config manifest init --title "Title" --author "Name"  # Create mdf.yaml (non-interactive)
-mdf publish --preflight-only                         # Run submit-time checks without submitting
+mdf init                                             # Create mdf.yaml (asks on a terminal)
+mdf init --title "Title" --author "Doe, Jane"        # Create mdf.yaml (non-interactive)
+mdf check                                            # Run submit-time checks without submitting
 mdf publish --submit                                 # Submit to MDF
 
 # Update an existing dataset (publish a new version)
@@ -153,31 +165,30 @@ The first successful `mdf publish --submit` writes the dataset's `source_id`
 into `mdf.yaml`; that is how `--update` finds it later (a plain `--submit` on a
 published manifest is refused rather than creating a duplicate dataset).
 An update starts from the dataset's current metadata — description, keywords,
-license, funding, related works — and applies your changes (mdf.yaml fields and
-`--title`/`--author`/`--description`) on top. Without data paths (on the command
-line or in `mdf.yaml`) it is a metadata-only update that keeps the previous files.
+license, funding, related works — and applies `mdf.yaml`, then
+`--title`/`--author`/`--description`, on top (a key set to an empty value in
+`mdf.yaml` clears it). Only data paths given on the command line are uploaded;
+without them it is a metadata-only update that keeps the previous files.
 
 On the staging service (the public beta), submissions get DataCite **test** DOIs
-(prefix `10.23677`) that do not resolve on doi.org; `mdf publish --submit` says so.
+(prefix `10.23677`) that do not resolve on doi.org; `mdf publish --submit` and
+`mdf import --submit` say so on stderr.
 
 ### Manifest management
 
 ```bash
-mdf setup                                     # Configure defaults + create mdf.yaml (interactive)
-mdf config manifest init                      # Create mdf.yaml (interactive)
-mdf config manifest init --title "T" --author "A"  # Create mdf.yaml (non-interactive)
-mdf config manifest discover *.csv *.json     # Extract metadata from files into mdf.yaml
-mdf config manifest inspect                   # Show a readable summary of the current manifest
+mdf init                                      # Create mdf.yaml
+mdf manifest discover *.csv *.json            # Extract metadata from files into mdf.yaml
+mdf manifest inspect                          # Show a readable summary of the current manifest
 ```
 
-### Dataset utilities
+### Datasets
 
 ```bash
-mdf dataset cite my_dataset_v1               # Citation (-f apa|bibtex|ris|datacite)
-mdf dataset cite my_dataset_v1 -f bibtex -o ref.bib  # Write it to a file (plain text when piped)
+mdf cite my_dataset_v1                       # Citation (-f apa|bibtex|ris|datacite)
+mdf cite my_dataset_v1 -f bibtex -o ref.bib  # Write it to a file (plain text when piped)
+mdf versions my_dataset_v1                   # Version history table
 mdf dataset open my_dataset_v1               # Open the dataset page in a browser
-mdf dataset preview my_dataset_v1            # File listing / data preview
-mdf dataset versions my_dataset_v1           # Version history table
 mdf dataset diff my_dataset_v1 --from 1.0 --to 2.0  # Metadata diff between versions
 mdf dataset edit my_dataset_v1 --title "New Title"  # Edit metadata on a submission
 mdf dataset withdraw my_dataset_v1           # Withdraw a pending_curation submission
@@ -187,19 +198,25 @@ mdf dataset resubmit my_dataset_v1           # Resubmit a rejected submission
 ### Discoverability
 
 ```bash
-mdf list                            # List your submitted datasets
+mdf list                            # Your datasets: latest versions, no deleted/withdrawn
+mdf list --all                      # Everything, including older versions
 mdf list --limit 50                 # More results
 
 mdf show my_dataset_v1              # Formatted dataset card
 mdf show my_dataset_v1 --cite       # Include citation
+mdf show my_dataset_v1 --files      # Include the file list (--sample: a data sample)
 mdf show my_dataset_v1 --json       # Raw JSON output
+
+mdf clone my_dataset_v1 --plan          # What a download would do (reads the card only)
+mdf clone my_dataset_v1 --plan --files  # Also list every file (may need a login)
+mdf clone my_dataset_v1                 # Download
 
 mdf status                          # Status of last published dataset
 mdf status my_dataset_v1            # Status of specific dataset
 mdf status my_dataset_v1 --watch    # Poll until terminal state
 
-mdf search "perovskite"             # Keyword search across datasets and streams
-mdf search "XRD" --type streams     # Search only streams
+mdf search "perovskite"             # Keyword search
+mdf search "perovskite" --json --brief  # IDs, titles, authors, DOIs
 mdf search "battery cathodes" --semantic  # Vector search over title + description embeddings
 
 mdf related my_dataset_v1                   # Datasets sharing authors (ORCID-first)
@@ -227,11 +244,6 @@ mdf import zenodo:12345 --submit           # Download + submit to MDF
 mdf import zenodo:12345 -o ./data --submit # Custom output dir
 ```
 
-### Streaming (automated labs)
-
-File streaming is disabled for the initial MDF v2 release. Datasets publish by
-reference to configured Globus data sources instead.
-
 ### Configuration
 
 ```bash
@@ -240,21 +252,14 @@ mdf config set defaults.service staging  # Set default service
 mdf config set user.email me@example.com # Set user email (validated)
 mdf config get defaults.service          # Get a value
 mdf config path                          # Show config file location
-mdf config doctor                        # Diagnose config, auth, connectivity, manifest
 ```
 
-### Shortcuts
+### Scripting
 
-A handful of older top-level spellings (`mdf versions`, `mdf pending`, `mdf approve`,
-`mdf reject`, `mdf validate`, `mdf whoami`, `mdf update`, `mdf cite`, `mdf watch`, ...)
-still work as hidden aliases for backward compatibility, but are not shown in `--help`
-and may be removed in a future release. Use the `mdf dataset ...` / `mdf admin ...` /
-`mdf status --auth` / `mdf publish --preflight-only|--update` forms documented above.
-
-`mdf backend ...` is also a hidden sub-app exposing low-level backend API calls
-(`health`, `status`, `submissions`, `card`, `cite`, `preview`, `search`, ...) with
-`--json` output for scripting. It's an advanced/debugging escape hatch, not the
-primary interface.
+Every command that reads or writes data takes `--json`: stdout is then exactly
+one JSON document, failures are `{"success": false, "error": {"kind", "code",
+"message", "hint"}}`, and the exit code says what happened: `0` ok, `2` usage,
+`3` not found, `4` login/permission, `5` network or service.
 
 ### Service targeting
 
@@ -299,9 +304,13 @@ agent = MDFAgent.init_manifest(
 agent.manifest.data_sources = ["./data"]
 agent.save_manifest()
 result = agent.publish(service_instance="staging", dry_run=False)
-
-# File streaming is disabled for the initial MDF v2 release.
 ```
+
+The SDK may start an interactive Globus login when it has no credentials (it
+prompts on stderr). To fail instead, pass `interactive=False` to
+`BackendClient.authenticated(...)`, or wrap calls in
+`mdf.auth.globus.interactive_login(False)`; a missing login then raises
+`mdf.core.exceptions.AuthRequired`.
 
 ### BackendClient (low-level API)
 

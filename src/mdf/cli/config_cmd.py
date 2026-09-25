@@ -1,4 +1,4 @@
-"""CLI commands for mdf config show/set/get/path/doctor + manifest subcommands."""
+"""`mdf config show|get|set|path` and `mdf doctor`."""
 
 from __future__ import annotations
 
@@ -6,19 +6,16 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.markup import escape
 
 from mdf.core.config import GlobalConfig, resolve_service
 from mdf.cli import theme
-from mdf.cli.manifest_cmd import app as manifest_app
+from mdf.cli.options import ApiUrlOpt, JsonOpt, ServiceOpt
 from mdf.cli.theme import console
 
-app = typer.Typer(help="Manage configuration")
-
-app.add_typer(manifest_app, name="manifest")
+app = typer.Typer(help="Show and change CLI defaults (~/.config/mdf/config.json)", no_args_is_help=True)
 
 
 @app.command("show")
@@ -32,7 +29,7 @@ def show():
             "No configuration set yet.",
             title="no config",
             hints=[
-                "run `mdf setup` for guided configuration",
+                "set a default with `mdf config set user.organization \"My Lab\"`",
                 f"config file would live at {cfg.path}",
             ],
         ))
@@ -80,19 +77,19 @@ def path():
     console.print(str(cfg.path))
 
 
-@app.command()
 def doctor(
-    json_output: bool = typer.Option(False, "--json", help="JSON output"),
-    service: Optional[str] = typer.Option(None, "--service", "-s", help="Service instance"),
-    api_url: Optional[str] = typer.Option(None, "--api-url", help="Override API URL"),
+    json_output: JsonOpt = False,
+    service: ServiceOpt = None,
+    api_url: ApiUrlOpt = None,
 ):
-    """Run diagnostics on your MDF Agent setup.
+    """Check your setup: service, connectivity, login, and the local mdf.yaml.
 
-    Checks config, auth, service, connectivity, and local manifest.
+    Exits 0 when everything checks out; otherwise with the code of the first
+    problem (5 service/connectivity, 4 login, 2 manifest).
 
     Examples:
-        mdf config doctor
-        mdf config doctor --json
+        mdf doctor
+        mdf doctor --json
     """
     from mdf.version import __version__
     from mdf.core.agent import MDFAgent
@@ -106,8 +103,8 @@ def doctor(
     cfg_path = Path.home() / ".config" / "mdf" / "config.json"
     checks.append({
         "name": "Config",
-        "ok": cfg_path.exists(),
-        "detail": str(cfg_path),
+        "ok": True,
+        "detail": str(cfg_path) if cfg_path.exists() else f"{cfg_path} (not created yet; optional)",
     })
 
     try:
@@ -135,8 +132,9 @@ def doctor(
                 health = client.health()
             client.close()
             ms = round((time.monotonic() - t0) * 1000)
-            conn_ok = health.get("success", health.get("status") == "ok")
-            checks.append({"name": "Connectivity", "ok": conn_ok, "detail": f"Backend healthy ({ms}ms)"})
+            conn_ok = bool(health.get("success", health.get("status") == "ok"))
+            detail = f"Backend healthy ({ms}ms)" if conn_ok else str(health.get("error") or health.get("detail") or "unhealthy")
+            checks.append({"name": "Connectivity", "ok": conn_ok, "detail": detail})
         except Exception as e:
             checks.append({"name": "Connectivity", "ok": False, "detail": str(e)})
     else:
@@ -159,10 +157,24 @@ def doctor(
         except Exception as e:
             checks.append({"name": "Manifest", "ok": False, "detail": f"mdf.yaml invalid: {e}"})
     else:
-        checks.append({"name": "Manifest", "ok": False, "detail": "No mdf.yaml in current directory"})
+        checks.append({"name": "Manifest", "ok": True, "detail": "No mdf.yaml here (only needed to publish)"})
+
+    failed = [c["name"] for c in checks if not c["ok"]]
+    kind = None
+    if failed:
+        if "Service" in failed or "Connectivity" in failed:
+            kind = "network"
+        elif "Auth" in failed:
+            kind = "auth"
+        else:
+            kind = "validation"
 
     if json_output:
-        print(json.dumps({"success": all(c["ok"] for c in checks), "checks": checks}, indent=2))
+        from mdf.cli.formatting import json_fail, json_ok
+
+        if kind:
+            json_fail(kind=kind, message=f"{len(failed)} check(s) failed: {', '.join(failed)}", extra={"checks": checks})
+        json_ok({"checks": checks})
         return
 
     console.print()
@@ -177,13 +189,16 @@ def doctor(
             detail=escape(str(c["detail"])),
         )
     console.print(checklist)
-    if all(check["ok"] for check in checks):
-        console.print()
-        console.print(theme.mark("ok", "Everything checks out.", style="ok"))
-    else:
-        console.print()
-        console.print(
-            "[hint]hint: fix the ✗ rows above — `mdf login` for auth, "
-            "`mdf setup` for config/manifest[/hint]"
-        )
     console.print()
+    if not kind:
+        console.print(theme.mark("ok", "Everything checks out.", style="ok"))
+        console.print()
+        return
+    console.print(
+        "[hint]hint: fix the ✗ rows above — `mdf login` for auth, `mdf init` for a manifest, "
+        "--service to pick another service[/hint]"
+    )
+    console.print()
+    from mdf.cli.formatting import EXIT_CODE_BY_KIND
+
+    raise typer.Exit(code=EXIT_CODE_BY_KIND[kind])

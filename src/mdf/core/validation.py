@@ -1,4 +1,4 @@
-"""Manifest validation for MDF Agent.
+"""Manifest validation for MDF CLI.
 
 This module provides validation functions to check manifest configurations
 before submission. Validation catches common errors early, before the

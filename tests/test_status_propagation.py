@@ -193,6 +193,8 @@ def test_handle_api_result_falls_back_to_substrings_without_status(capsys):
 
 
 class _FakePreviewClient:
+    """A dataset whose card loads; the file listing answers ``result``."""
+
     def __init__(self, result):
         self._result = result
 
@@ -201,6 +203,11 @@ class _FakePreviewClient:
 
     def search(self, query, search_type="datasets", limit=10):
         return {"results": []}
+
+    def get_card(self, source_id, version=None):
+        if source_id == "no-such-dataset":
+            return ApiResult({"detail": "Dataset not found"}, status_code=404)
+        return ApiResult({"success": True, "card": {"source_id": source_id, "title": "T"}}, status_code=200)
 
     def dataset_preview(self, source_id):
         return self._result
@@ -211,49 +218,47 @@ class _FakePreviewClient:
 
 def _patch_preview(monkeypatch, result) -> None:
     monkeypatch.setattr(
-        "mdf.cli.dataset_cmd.read_client",
+        "mdf.cli.formatting.read_client",
         lambda **kwargs: _FakePreviewClient(result),
     )
 
 
 def test_preview_404_degrades_gracefully(monkeypatch):
     _patch_preview(monkeypatch, ApiResult({"detail": "No profile found"}, status_code=404))
-    result = runner.invoke(app, ["dataset", "preview", "migrated_v1"])
+    result = runner.invoke(app, ["show", "migrated_v1", "--files"])
     assert result.exit_code == 0
     assert "No file profile exists for this dataset" in result.stdout
-    assert "mdf show migrated_v1" in result.stdout
-    assert "mdf clone migrated_v1" in result.stdout
+    assert "mdf clone migrated_v1 --plan --files" in result.stdout
     assert "No file information available" not in result.stdout
 
 
 def test_preview_404_json_exits_zero(monkeypatch):
     _patch_preview(monkeypatch, ApiResult({"detail": "No profile found"}, status_code=404))
-    result = runner.invoke(app, ["dataset", "preview", "migrated_v1", "--json"])
+    result = runner.invoke(app, ["show", "migrated_v1", "--files", "--json"])
     assert result.exit_code == 0
-    assert json.loads(result.stdout)["detail"] == "No profile found"
+    assert json.loads(result.stdout)["files"] is None
 
 
 def test_preview_404_dataset_not_found_still_errors(monkeypatch):
-    """A 404 for a nonexistent dataset (typo'd id) must NOT be treated as
-    profile-missing: it keeps normal error handling and exits 3 (not found)."""
+    """A nonexistent dataset (typo'd id) is not a missing profile: exit 3."""
     _patch_preview(monkeypatch, ApiResult({"detail": "Dataset not found"}, status_code=404))
-    result = runner.invoke(app, ["dataset", "preview", "no-such-dataset"])
+    result = runner.invoke(app, ["show", "no-such-dataset", "--files"])
     assert result.exit_code == 3
     assert "No file profile exists" not in result.stdout
 
 
 def test_preview_404_dataset_not_found_json_exits_not_found(monkeypatch):
     _patch_preview(monkeypatch, ApiResult({"detail": "Dataset not found"}, status_code=404))
-    result = runner.invoke(app, ["dataset", "preview", "no-such-dataset", "--json"])
+    result = runner.invoke(app, ["show", "no-such-dataset", "--files", "--json"])
     assert result.exit_code == 3
-    assert json.loads(result.stdout)["detail"] == "Dataset not found"
+    assert json.loads(result.stdout)["error"]["kind"] == "not_found"
 
 
 def test_preview_500_still_errors(monkeypatch):
     _patch_preview(monkeypatch, ApiResult({"detail": "boom"}, status_code=500))
-    result = runner.invoke(app, ["dataset", "preview", "migrated_v1"])
+    result = runner.invoke(app, ["show", "migrated_v1", "--files"])
     assert result.exit_code == 5
-    assert "Preview failed" in result.stdout
+    assert "Could not load the file list" in result.stdout
 
 
 def test_preview_200_without_envelope_renders_files(monkeypatch):
@@ -261,7 +266,7 @@ def test_preview_200_without_envelope_renders_files(monkeypatch):
         monkeypatch,
         ApiResult({"files": [{"filename": "data.csv", "size": 2048}]}, status_code=200),
     )
-    result = runner.invoke(app, ["dataset", "preview", "migrated_v1"])
+    result = runner.invoke(app, ["show", "migrated_v1", "--files"])
     assert result.exit_code == 0
     assert "data.csv" in result.stdout
 
@@ -287,8 +292,8 @@ def test_versions_escapes_title_markup(monkeypatch):
                 status_code=200,
             )
 
-    monkeypatch.setattr("mdf.cli.dataset_cmd.read_client", lambda **kwargs: FakeClient())
-    result = runner.invoke(app, ["dataset", "versions", "src-1"])
+    monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: FakeClient())
+    result = runner.invoke(app, ["versions", "src-1"])
     assert result.exit_code == 0
     assert MARKUP_TITLE in result.stdout
 
@@ -307,7 +312,7 @@ def test_related_escapes_title_markup(monkeypatch):
                 status_code=200,
             )
 
-    monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: FakeClient())
+    monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: FakeClient())
     result = runner.invoke(app, ["related", "src-1"])
     assert result.exit_code == 0
     assert MARKUP_TITLE in result.stdout
@@ -325,7 +330,7 @@ def test_admin_pending_escapes_title_markup(monkeypatch):
             )
 
     monkeypatch.setattr(
-        "mdf.cli.admin_cmd.BackendClient.authenticated", lambda **kwargs: FakeClient()
+        "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: FakeClient()
     )
     result = runner.invoke(app, ["admin", "pending"])
     assert result.exit_code == 0

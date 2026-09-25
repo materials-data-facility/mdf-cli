@@ -1,4 +1,4 @@
-"""MDF Agent - Primary Python API.
+"""MDF Python API (used by the `mdf` CLI).
 
 This module provides the main MDFAgent class, which is the primary interface
 for interacting with MDF datasets programmatically.
@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import time
 import zipfile
 from pathlib import Path, PurePosixPath
 import re
@@ -35,6 +36,7 @@ from mdf.core.submission import build_submission
 from mdf.core.validation import validate_manifest
 from mdf.core.backend_client import BackendClient, _api_url_for_service
 from mdf.extractors.registry import discover_metadata
+from mdf.core.exceptions import AuthRequired, MDFError
 from mdf.models.config import Author, ManifestConfig
 
 #: Core never prints: warnings go through logging (Python's last-resort handler
@@ -160,6 +162,20 @@ class UploadResult(NamedTuple):
     data_sources: List[str]
     archive_url: Optional[str]
     archive_size: Optional[int]
+
+
+class CloneListingError(MDFError, RuntimeError):
+    """Listing a dataset's files on the MDF Globus collection failed or timed out.
+
+    A clone that cannot list every directory is an error, not a warning: a
+    silently partial file list turns into a silently partial download.
+    """
+
+
+#: Per-request cap on one Globus Transfer ``operation_ls`` call, in seconds.
+_LISTING_HTTP_TIMEOUT = 30
+#: Default wall-clock cap on listing a whole dataset, in seconds.
+DEFAULT_LISTING_TIMEOUT = 300
 
 
 class ResolvedFiles(NamedTuple):
@@ -565,6 +581,9 @@ def _https_dest_for_url(url: str, out: Path) -> Path:
 def _resolve_globus_files(
     data_sources: List[str],
     transfer_token: str,
+    *,
+    on_progress: Optional[Callable[[int], None]] = None,
+    timeout: Optional[float] = DEFAULT_LISTING_TIMEOUT,
 ) -> ResolvedFiles:
     """Resolve globus:// URIs to (https_url, relative_path) pairs for HTTPS download.
 
@@ -576,8 +595,15 @@ def _resolve_globus_files(
     returned in ``unsupported`` — cleartext transport would leak the download
     and cannot carry credentials safely.
     Non-globus sources (stream://) are skipped.
+
+    Listing a directory needs a Globus Transfer token: without one this raises
+    :class:`~mdf.core.exceptions.AuthRequired`. A listing that fails or runs
+    past ``timeout`` seconds (overall) raises :class:`CloneListingError`.
+    ``on_progress(n)`` is called with the running file count while listing.
     """
     import globus_sdk
+
+    deadline = time.monotonic() + timeout if timeout else None
 
     results: List[tuple] = []
     https_sources: List[str] = []
@@ -615,9 +641,18 @@ def _resolve_globus_files(
 
         if path.endswith("/"):
             # Directory URI — use operation_ls to list files recursively
+            if not transfer_token:
+                raise AuthRequired(
+                    "Listing this dataset's files needs a Globus login (Globus Transfer)"
+                )
             authorizer = globus_sdk.AccessTokenAuthorizer(transfer_token)
-            tc = globus_sdk.TransferClient(authorizer=authorizer)
-            _ls_recursive(tc, endpoint_id, path, path, results)
+            tc = globus_sdk.TransferClient(
+                authorizer=authorizer,
+                transport_params={"http_timeout": _LISTING_HTTP_TIMEOUT, "max_retries": 2},
+            )
+            _ls_recursive(
+                tc, endpoint_id, path, path, results, on_progress=on_progress, deadline=deadline
+            )
         else:
             # Per-file URI
             https_url = f"{_MDF_HTTPS_BASE}{path}"
@@ -639,13 +674,27 @@ def _ls_recursive(
     dir_path: str,
     base_path: str,
     results: List[tuple],
+    *,
+    on_progress: Optional[Callable[[int], None]] = None,
+    deadline: Optional[float] = None,
 ) -> None:
-    """Recursively list a Globus directory, appending (https_url, rel_path) to results."""
+    """Recursively list a Globus directory, appending (https_url, rel_path) to results.
+
+    Raises :class:`CloneListingError` on any failed listing or when ``deadline``
+    (a ``time.monotonic()`` value) passes; a 401/403 raises ``AuthRequired``.
+    """
+    if deadline is not None and time.monotonic() > deadline:
+        raise CloneListingError(
+            f"Listing {base_path} timed out after {len(results)} file(s)"
+        )
     try:
         listing = tc.operation_ls(endpoint_id, path=dir_path)
     except Exception as exc:
-        logger.warning("Warning: Failed to list %s: %s", dir_path, exc)
-        return
+        if getattr(exc, "http_status", None) in (401, 403):
+            raise AuthRequired(
+                "Globus Transfer rejected the login while listing files; run `mdf login` again"
+            ) from exc
+        raise CloneListingError(f"Could not list {dir_path}: {exc}") from exc
 
     for entry in listing:
         entry_type = entry.get("type", entry.get("DATA_TYPE", ""))
@@ -653,12 +702,17 @@ def _ls_recursive(
         full_path = f"{dir_path}{name}" if dir_path.endswith("/") else f"{dir_path}/{name}"
 
         if entry_type == "dir":
-            _ls_recursive(tc, endpoint_id, full_path + "/", base_path, results)
+            _ls_recursive(
+                tc, endpoint_id, full_path + "/", base_path, results,
+                on_progress=on_progress, deadline=deadline,
+            )
         else:
             https_url = f"{_MDF_HTTPS_BASE}{full_path}"
             # Relative path from the base directory
             rel = full_path[len(base_path):].lstrip("/")
             results.append((https_url, rel))
+            if on_progress:
+                on_progress(len(results))
 
 
 def _download_https_file(
@@ -749,7 +803,7 @@ def _detect_gcp_endpoint() -> Optional[str]:
 
 
 class MDFAgent:
-    """Primary Python API for MDF Agent.
+    """Primary Python API for MDF.
 
     This class provides a high-level interface for creating, managing, and
     publishing datasets to the Materials Data Facility (MDF).
@@ -906,13 +960,16 @@ class MDFAgent:
                 raise RuntimeError(_NO_DATA_TOKEN_MESSAGE)
 
             if local_sources and client._globus_data_token:
-                # Use source_id for deterministic upload paths when available
-                ext = payload.get("extensions", {})
-                upload_source_id = ext.get("mdf_source_id") or ext.get("mdf_source_name")
+                # Always a fresh staging location (/tmp/_uploads/<uuid>/). An
+                # update must never write into an existing dataset directory
+                # such as /mdf_open/{source_id}/ — that is where earlier
+                # versions' files live. The per-version home
+                # (/mdf_open/{source_id}/{version}/) is only known server-side,
+                # after the submission assigns the version.
                 upload_result = _upload_local_files(
                     data_sources,
                     client._globus_data_token,
-                    source_id=upload_source_id,
+                    source_id=None,
                     progress_callback=progress_callback,
                     transfer_token=client._globus_transfer_token,
                     workers=workers,
@@ -1101,118 +1158,6 @@ class MDFAgent:
             dev_user_id=dev_user_id,
         )
         result = client.get_citation(source_id, format=format, version=version)
-        client.close()
-        return result
-
-    # Streaming helpers
-    def stream_create(
-        self,
-        title: str,
-        lab_id: Optional[str] = None,
-        organization: Optional[str] = None,
-        api_url: Optional[str] = None,
-        token: Optional[str] = None,
-        service_instance: Optional[str] = None,
-        dev_user_id: Optional[str] = None,
-    ):
-        client = BackendClient.authenticated(
-            base_url=api_url,
-            token=token,
-            service_instance=service_instance,
-            dev_user_id=dev_user_id,
-        )
-        result = client.stream_create(title, lab_id=lab_id, organization=organization)
-        client.close()
-        return result
-
-    def stream_append(
-        self,
-        stream_id: str,
-        files: Optional[Any] = None,
-        file_count: Optional[int] = None,
-        total_bytes: Optional[int] = None,
-        api_url: Optional[str] = None,
-        token: Optional[str] = None,
-        service_instance: Optional[str] = None,
-        dev_user_id: Optional[str] = None,
-    ):
-        client = BackendClient.authenticated(
-            base_url=api_url,
-            token=token,
-            service_instance=service_instance,
-            dev_user_id=dev_user_id,
-        )
-        result = client.stream_append(stream_id, files=files, file_count=file_count, total_bytes=total_bytes)
-        client.close()
-        return result
-
-    def stream_status(
-        self,
-        stream_id: str,
-        api_url: Optional[str] = None,
-        token: Optional[str] = None,
-        service_instance: Optional[str] = None,
-        dev_user_id: Optional[str] = None,
-    ):
-        client = BackendClient.authenticated(
-            base_url=api_url,
-            token=token,
-            service_instance=service_instance,
-            dev_user_id=dev_user_id,
-        )
-        result = client.stream_status(stream_id)
-        client.close()
-        return result
-
-    def stream_close(
-        self,
-        stream_id: str,
-        mint_doi: Optional[bool] = None,
-        title: Optional[str] = None,
-        description: Optional[str] = None,
-        authors: Optional[list] = None,
-        keywords: Optional[list] = None,
-        license: Optional[str] = None,
-        api_url: Optional[str] = None,
-        token: Optional[str] = None,
-        service_instance: Optional[str] = None,
-        dev_user_id: Optional[str] = None,
-    ):
-        client = BackendClient.authenticated(
-            base_url=api_url,
-            token=token,
-            service_instance=service_instance,
-            dev_user_id=dev_user_id,
-        )
-        result = client.stream_close(
-            stream_id=stream_id,
-            mint_doi=mint_doi,
-            title=title,
-            description=description,
-            authors=authors,
-            keywords=keywords,
-            license=license,
-        )
-        client.close()
-        return result
-
-    def stream_snapshot(
-        self,
-        stream_id: str,
-        title: Optional[str] = None,
-        update: bool = False,
-        api_url: Optional[str] = None,
-        token: Optional[str] = None,
-        service_instance: Optional[str] = None,
-        dev_user_id: Optional[str] = None,
-    ):
-        client = BackendClient.authenticated(
-            base_url=api_url,
-            token=token,
-            service_instance=service_instance,
-            dev_user_id=dev_user_id,
-        )
-        result = client.stream_snapshot(stream_id, title=title, update=update)
         client.close()
         return result
 
@@ -1504,6 +1449,9 @@ class MDFAgent:
         service_instance: Optional[str],
         dev_user_id: Optional[str],
         create_dirs: bool = True,
+        resolve_files: bool = True,
+        on_listing: Optional[Callable[[int], None]] = None,
+        listing_timeout: Optional[float] = DEFAULT_LISTING_TIMEOUT,
     ):
         """Pick the client for a clone: anonymous first for public datasets.
 
@@ -1520,22 +1468,38 @@ class MDFAgent:
         plan short-circuited the authenticated retry and the caller saw a
         spurious "not found" instead of their own private dataset.
         """
+        anonymous_failure: Optional[BaseException] = None
         if token is None and dev_user_id is None and method != "transfer":
             anon_client = self._make_anonymous_client(api_url=api_url, service_instance=service_instance)
             try:
-                candidate = self._prepare_clone(anon_client, source_id, output_dir, version, method, create_dirs=create_dirs)
+                candidate = self._prepare_clone(
+                    anon_client, source_id, output_dir, version, method,
+                    create_dirs=create_dirs, resolve_files=resolve_files,
+                    on_listing=on_listing, listing_timeout=listing_timeout,
+                )
                 if candidate.get("success") and candidate.get("selected_method") != "transfer":
                     return anon_client, candidate, True
-            except Exception:
-                pass
+            except Exception as exc:
+                anonymous_failure = exc
             anon_client.close()
 
-        client = BackendClient.authenticated(
-            base_url=api_url,
-            token=token,
-            service_instance=service_instance,
-            dev_user_id=dev_user_id,
-        )
+        try:
+            client = BackendClient.authenticated(
+                base_url=api_url,
+                token=token,
+                service_instance=service_instance,
+                dev_user_id=dev_user_id,
+            )
+        except AuthRequired as exc:
+            # Say *why* a login is needed, not just that one is missing.
+            if isinstance(anonymous_failure, AuthRequired):
+                raise anonymous_failure from exc
+            if method == "transfer":
+                raise AuthRequired("Globus Transfer downloads need a Globus login") from exc
+            raise AuthRequired(
+                f"'{source_id}' is not publicly readable (it may be private, pending "
+                "curation, or not exist); log in to reach your own datasets"
+            ) from exc
         return client, None, False
 
     def plan_clone(
@@ -1548,26 +1512,40 @@ class MDFAgent:
         token: Optional[str] = None,
         service_instance: Optional[str] = None,
         dev_user_id: Optional[str] = None,
+        list_files: bool = False,
+        on_listing: Optional[Callable[[int], None]] = None,
+        listing_timeout: Optional[float] = DEFAULT_LISTING_TIMEOUT,
     ) -> Dict[str, Any]:
-        """Inspect how clone will behave without downloading data."""
-        client: Optional[BackendClient] = None
-        plan: Optional[Dict[str, Any]] = None
+        """Inspect how clone will behave without downloading data.
 
+        Reads the dataset card only (fast, anonymous for public data). With
+        ``list_files=True`` it also lists every file, which for datasets
+        without an archive needs a Globus login and may take a while; the
+        listing is bounded by ``listing_timeout`` seconds and reports its
+        running file count to ``on_listing``.
+        """
         client, plan, used_anonymous = self._client_for_clone(
             source_id, output_dir, version, method,
             api_url=api_url, token=token, service_instance=service_instance, dev_user_id=dev_user_id,
-            create_dirs=False,
+            create_dirs=False, resolve_files=list_files,
+            on_listing=on_listing, listing_timeout=listing_timeout,
         )
         try:
             if plan is None:
-                plan = self._prepare_clone(client, source_id, output_dir, version, method, create_dirs=False)
+                plan = self._prepare_clone(
+                    client, source_id, output_dir, version, method,
+                    create_dirs=False, resolve_files=list_files,
+                    on_listing=on_listing, listing_timeout=listing_timeout,
+                )
         finally:
             client.close()
 
         if not plan.get("success"):
             return plan
 
-        return {
+        card = plan.get("card") or {}
+        stats = card.get("stats") or {}
+        summary: Dict[str, Any] = {
             "success": True,
             "requested_identifier": plan["requested_identifier"],
             "resolved_source_id": plan["resolved_source_id"],
@@ -1578,8 +1556,23 @@ class MDFAgent:
             "selected_method": plan["selected_method"],
             "archive_available": plan["archive_available"],
             "archive_size": plan.get("archive_size"),
-            "file_count": plan.get("file_count"),
+            # From the listing when one ran, else what the card knows (may be unknown).
+            "file_count": plan.get("file_count") if list_files else (stats.get("file_count") or None),
+            "total_bytes": stats.get("total_bytes") or None,
+            # Downloading without an archive means listing the collection
+            # through Globus Transfer, which needs a login.
+            "auth_needed": plan["selected_method"] == "transfer"
+            or (
+                plan["selected_method"] == "https"
+                and any(str(src).rstrip().endswith("/") and str(src).startswith("globus://")
+                        for src in plan.get("data_sources") or [])
+            ),
         }
+        if list_files:
+            summary["files"] = [rel for _url, rel in plan.get("files") or []] + list(
+                plan.get("https_sources") or []
+            )
+        return summary
 
     def _prepare_clone(
         self,
@@ -1589,6 +1582,9 @@ class MDFAgent:
         version: Optional[str],
         method: str,
         create_dirs: bool = True,
+        resolve_files: bool = True,
+        on_listing: Optional[Callable[[int], None]] = None,
+        listing_timeout: Optional[float] = DEFAULT_LISTING_TIMEOUT,
     ) -> Dict[str, Any]:
         requested_identifier = source_id
 
@@ -1652,10 +1648,12 @@ class MDFAgent:
         https_sources = None
         unsupported: List[str] = []
         file_count = None
-        if selected_method == "https":
+        if selected_method == "https" and resolve_files:
             if not data_sources:
                 return {"success": False, "error": "No data sources found for this dataset"}
-            resolved = _resolve_globus_files(data_sources, transfer_token)
+            resolved = _resolve_globus_files(
+                data_sources, transfer_token, on_progress=on_listing, timeout=listing_timeout
+            )
             files = resolved.files
             https_sources = resolved.https_sources
             unsupported = list(resolved.unsupported)

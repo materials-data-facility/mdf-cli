@@ -309,3 +309,48 @@ def test_clone_escalates_to_authenticated_on_401_or_403(monkeypatch, tmp_path):
     assert anon_closed is True
     assert auth_called is True
     assert result["files_count"] == 1
+
+
+def test_update_uploads_never_target_the_existing_dataset_directory(monkeypatch, tmp_path):
+    """An update's new files go to a fresh upload location, not /mdf_open/{source_id}/."""
+    from mdf.core import agent as agent_module
+
+    local_file = tmp_path / "data.csv"
+    local_file.write_text("a,b,c")
+    agent = MDFAgent()
+    monkeypatch.setattr(
+        agent,
+        "build_submission",
+        lambda test=False, update=False: {
+            "source_id": "ds_one",
+            "update": True,
+            "title": "T",
+            "authors": [{"name": "A"}],
+            "data_sources": [str(local_file)],
+            "extensions": {"mdf_source_id": "ds_one"},  # legacy key must not steer uploads
+        },
+    )
+    seen: Dict[str, Any] = {}
+
+    def fake_upload(data_sources, data_token, source_id=None, **kwargs):
+        seen["source_id"] = source_id
+        return agent_module.UploadResult(["globus://x/tmp/_uploads/abc/data.csv"], None, None)
+
+    monkeypatch.setattr(agent_module, "_upload_local_files", fake_upload)
+
+    class _Client:
+        _globus_data_token = "dt"
+        _globus_transfer_token = "tt"
+
+        def auth_check(self):
+            return {"is_submitter": True}
+
+        def close(self):
+            pass
+
+        def submit(self, payload):
+            return {"success": True, "source_id": "ds_one", "version": "2.0"}
+
+    monkeypatch.setattr("mdf.core.agent.BackendClient.authenticated", lambda **kwargs: _Client())
+    assert agent.publish(update=True, dry_run=False, token="tok")["success"] is True
+    assert seen["source_id"] is None

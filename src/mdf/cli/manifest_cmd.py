@@ -1,8 +1,4 @@
-"""MDF manifest subcommands.
-
-Provides `mdf manifest init` and `mdf manifest discover` for creating
-and enriching mdf.yaml manifest files without git.
-"""
+"""mdf.yaml commands: `mdf init` (create) and `mdf manifest discover|inspect`."""
 
 from __future__ import annotations
 
@@ -16,7 +12,7 @@ from rich.markup import escape
 from mdf.core.agent import MDFAgent
 from mdf.core.config import resolve_service
 from mdf.cli import theme
-from mdf.cli.formatting import format_authors
+from mdf.cli.formatting import EXIT_USAGE, format_authors
 from mdf.cli.preflight import suggest_data_sources
 from mdf.cli.theme import console
 
@@ -50,9 +46,8 @@ app = typer.Typer(
 )
 
 
-@app.command("init")
-def manifest_init(
-    path: str = typer.Argument(".", help="Directory to create mdf.yaml in"),
+def init(
+    path: str = typer.Argument(".", help="Dataset directory to create mdf.yaml in"),
     title: Optional[str] = typer.Option(None, "--title", "-t", help="Dataset title"),
     author: Optional[List[str]] = typer.Option(None, "--author", "-a", help="Author name (repeatable)"),
     description: Optional[str] = typer.Option(None, "--description", "-d", help="Dataset description"),
@@ -60,22 +55,34 @@ def manifest_init(
     publication_year: Optional[int] = typer.Option(None, "--year", "-y", help="Publication year"),
     organization: Optional[str] = typer.Option(None, "--organization", "-o", help="Owning organization"),
     keyword: Optional[List[str]] = typer.Option(None, "--keyword", "-k", help="Keyword (repeatable)"),
+    license: Optional[str] = typer.Option(None, "--license", "-l", help="License, e.g. CC-BY-4.0"),
 ):
     """Create an mdf.yaml manifest for a dataset directory.
 
-    The manifest stores metadata (title, authors, etc.) so you don't
-    have to pass it every time you publish.
+    On a terminal it asks for anything you did not pass; otherwise --title and
+    --author are required. The manifest stores the metadata so you don't have
+    to pass it every time you publish.
 
     Examples:
-        mdf manifest init --title "My Dataset" --author "Jane Doe"
-        mdf manifest init ./my_data --title "Test" --author "Jane"
+        mdf init
+        mdf init ./my_data --title "Test" --author "Doe, Jane" --license CC-BY-4.0
     """
     resolved_title = title
     resolved_authors = list(author) if author else []
     resolved_keywords = list(keyword) if keyword else []
 
+    if (Path(path).resolve() / "mdf.yaml").exists():
+        console.print(theme.error_panel(
+            f"mdf.yaml already exists in {escape(str(path))}",
+            title="Manifest exists",
+            border="yellow",
+            hint="edit it directly, or run `mdf manifest inspect` to review it",
+        ))
+        raise typer.Exit(code=EXIT_USAGE)
+
+    interactive = sys.stdin.isatty()
     if not resolved_title or not resolved_authors:
-        if sys.stdin.isatty():
+        if interactive:
             console.print()
             console.print(theme.rule(f"{theme.SCIENCE} Create MDF manifest"))
             console.print()
@@ -100,40 +107,27 @@ def manifest_init(
                 )
                 if raw_keywords:
                     resolved_keywords = [part.strip() for part in raw_keywords.split(",") if part.strip()]
+            if not license:
+                license = typer.prompt(
+                    "License (SPDX id, e.g. CC-BY-4.0; optional)", default="", show_default=False
+                ) or None
         else:
-            if not resolved_title:
-                console.print(theme.error_panel(
-                    "--title is required",
-                    title="Missing metadata",
-                    hint='example: mdf manifest init --title "My Dataset" --author "Jane Doe"',
-                ))
-                raise typer.Exit(code=1)
-            if not resolved_authors:
-                console.print(theme.error_panel(
-                    "--author is required",
-                    title="Missing metadata",
-                    hint='example: mdf manifest init --title "My Dataset" --author "Jane Doe"',
-                ))
-                raise typer.Exit(code=1)
+            # No terminal: never block on a prompt. Say which flags are missing.
+            missing = [flag for flag, value in (("--title", resolved_title), ("--author", resolved_authors)) if not value]
+            console.print(theme.error_panel(
+                f"{' and '.join(missing)} required (stdin is not a terminal, so mdf init cannot ask)",
+                title="Missing metadata",
+                hint='example: mdf init --title "My Dataset" --author "Doe, Jane"',
+            ))
+            raise typer.Exit(code=EXIT_USAGE)
 
-    if not resolved_title:
-        console.print(theme.error_panel("Title is required", title="Missing metadata"))
-        raise typer.Exit(code=1)
-    if not resolved_authors:
+    if not resolved_title or not resolved_authors:
         console.print(theme.error_panel(
-            "At least one author is required", title="Missing metadata"
+            "A title and at least one author are required", title="Missing metadata"
         ))
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=EXIT_USAGE)
 
     resolved_path = Path(path).resolve()
-    if (resolved_path / "mdf.yaml").exists():
-        console.print(theme.error_panel(
-            f"mdf.yaml already exists in {escape(str(path))}",
-            title="Manifest exists",
-            border="yellow",
-            hint="edit it directly, or run `mdf manifest inspect` to review it",
-        ))
-        raise typer.Exit(code=1)
 
     agent = MDFAgent.init_manifest(
         path=path,
@@ -144,7 +138,7 @@ def manifest_init(
         publication_year=publication_year,
     )
     suggested_sources = suggest_data_sources(resolved_path)
-    if suggested_sources and sys.stdin.isatty():
+    if suggested_sources and interactive:
         joined = ", ".join(suggested_sources)
         if typer.confirm(f"Use detected data source candidates ({joined})?", default=True):
             agent.manifest.data_sources = suggested_sources
@@ -152,7 +146,9 @@ def manifest_init(
         agent.manifest.organization = organization
     if resolved_keywords:
         agent.manifest.subjects = resolved_keywords
-    if agent.manifest.data_sources or organization or resolved_keywords:
+    if license:
+        agent.manifest.license = license
+    if agent.manifest.data_sources or organization or resolved_keywords or license:
         agent.save_manifest()
     detail = theme.detail_table(label_width=13)
     detail.add_row("Path", escape(str(resolved_path / "mdf.yaml")))
@@ -172,7 +168,11 @@ def manifest_init(
     console.print(theme.success_panel(
         detail, title="Created mdf.yaml", subtitle=escape(str(path))
     ))
-    console.print("[hint]hint: next run `mdf publish --preflight-only`[/hint]")
+    from mdf.cli.preflight import auth_ready
+
+    steps = [] if auth_ready(resolve_service(None)) else ["mdf login"]
+    steps += ["mdf check", "mdf publish --submit"]
+    console.print(f"[hint]Next: {' → '.join(steps)}[/hint]")
 
 
 @app.command("discover")
@@ -199,7 +199,7 @@ def manifest_discover(
         console.print(theme.error_panel(
             "No mdf.yaml found in current directory",
             title="No manifest",
-            hint="run `mdf manifest init` first",
+            hint="run `mdf init` first",
         ))
         raise typer.Exit(code=1)
 
@@ -253,7 +253,7 @@ def manifest_inspect(
         console.print(theme.error_panel(
             f"No mdf.yaml found in {escape(str(root))}",
             title="No manifest",
-            hint="run `mdf setup` or `mdf manifest init` in that directory",
+            hint="run `mdf init` in that directory",
         ))
         raise typer.Exit(code=1)
 

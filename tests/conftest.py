@@ -21,6 +21,6 @@ import pytest  # noqa: E402
 def _no_identity_lookup(monkeypatch):
     """`status --auth`/`login` look up name+email over the network; tests never do.
 
-    Tests that exercise the lookup patch ``mdf.cli.main._fetch_identity`` themselves.
+    Tests that exercise the lookup patch ``mdf.cli.commands.auth._fetch_identity`` themselves.
     """
-    monkeypatch.setattr("mdf.cli.main._fetch_identity", lambda **kwargs: {})
+    monkeypatch.setattr("mdf.cli.commands.auth._fetch_identity", lambda **kwargs: {})

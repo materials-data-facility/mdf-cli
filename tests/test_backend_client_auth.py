@@ -280,3 +280,87 @@ def test_sdk_default_still_prompts_on_stderr(monkeypatch, capsys):
     assert captured.out == ""
     assert "Visit this URL" in captured.err
     assert "Please authenticate with Globus here:" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: saved tokens are per API URL; tokens never go to other hosts
+# ---------------------------------------------------------------------------
+
+STAGING_URL = "https://3xicgt0g7l.execute-api.us-east-1.amazonaws.com/staging"
+
+
+def _saved_token_home(monkeypatch, tmp_path, logged_in=False):
+    from mdf.auth import globus as globus_auth
+    from mdf.core import config as core_config
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name in ("MDF_CONNECT_TOKEN", "MDF_DEV_USER_ID", "MDF_CLIENT_ID", "MDF_CLIENT_SECRET", "MDF_API_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(globus_auth, "is_logged_in", lambda **kwargs: logged_in)
+    core_config.save_token("saved-tok", STAGING_URL)
+    return core_config
+
+
+def test_saved_token_only_for_the_url_it_was_saved_for(monkeypatch, tmp_path):
+    import pytest
+
+    from mdf.auth.globus import interactive_login
+    from mdf.core.exceptions import AuthRequired
+
+    _saved_token_home(monkeypatch, tmp_path)
+    monkeypatch.setattr("mdf.auth.globus.UserApp", _LoginNeededUserApp)
+    monkeypatch.setattr("mdf.auth.globus.JSONTokenStorage", lambda path: SimpleNamespace())
+    monkeypatch.setattr("mdf.auth.globus.GlobusAppConfig", lambda **kwargs: SimpleNamespace())
+
+    assert BackendClient.authenticated(service_instance="staging")._token == "saved-tok"
+    with interactive_login(False):
+        # Another service, or an --api-url / MDF_API_URL host: never the saved token.
+        with pytest.raises(AuthRequired):
+            BackendClient.authenticated(service_instance="prod")
+        with pytest.raises(AuthRequired):
+            BackendClient.authenticated(base_url="https://evil.example", service_instance="staging")
+        monkeypatch.setenv("MDF_API_URL", "https://evil.example")
+        with pytest.raises(AuthRequired):
+            BackendClient.authenticated(service_instance="staging")
+
+
+def test_cached_globus_login_beats_a_saved_token(monkeypatch, tmp_path):
+    from mdf.auth import globus as globus_auth
+
+    _saved_token_home(monkeypatch, tmp_path, logged_in=True)
+    monkeypatch.setattr(globus_auth, "UserApp", _FakeUserApp)
+    monkeypatch.setattr(globus_auth, "JSONTokenStorage", lambda path: SimpleNamespace())
+    monkeypatch.setattr(globus_auth, "GlobusAppConfig", lambda **kwargs: SimpleNamespace())
+    client = BackendClient.authenticated(service_instance="staging")
+    assert client._token == "tok-auth.globus.org"
+
+
+def test_saved_token_file_is_atomic_owner_only_and_refuses_symlinks(monkeypatch, tmp_path):
+    import os
+    import stat
+
+    import pytest
+
+    core_config = _saved_token_home(monkeypatch, tmp_path)
+    path = core_config.saved_token_path()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert not [p for p in path.parent.iterdir() if p.name.endswith(".tmp")]
+
+    path.unlink()
+    target = tmp_path / "elsewhere.json"
+    target.write_text("{}")
+    os.symlink(target, path)
+    with pytest.raises(OSError, match="symlink"):
+        core_config.save_token("t2", STAGING_URL)
+    assert target.read_text() == "{}"
+
+
+def test_data_token_only_goes_to_the_exact_mdf_host():
+    from mdf.core.agent import _is_mdf_https_url
+
+    assert _is_mdf_https_url("https://data.materialsdatafacility.org/mdf_open/x/a.csv")
+    assert not _is_mdf_https_url("https://evilmaterialsdatafacility.org/a.csv")
+    assert not _is_mdf_https_url("https://data.materialsdatafacility.org.evil.example/a.csv")
+    # The stream download path that sent the API token to any *materialsdatafacility.org
+    # host is gone with the stream client (CLI-D4).
+    assert not [name for name in dir(BackendClient) if "stream" in name]

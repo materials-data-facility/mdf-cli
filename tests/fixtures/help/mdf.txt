@@ -1,7 +1,7 @@
 
  Usage: root [OPTIONS] COMMAND [ARGS]...
 
- MDF Agent — Materials Data Facility
+ MDF CLI — Materials Data Facility
 
    Options
   --version             -V        Show version and exit
@@ -10,30 +10,36 @@
                                   the installation.
   --help                          Show this message and exit.
 
-   Commands
-  mcp      Model Context Protocol server for AI assistants
+   Get started
+  login     Authenticate with Globus.
+  logout    Clear cached credentials.
+  whoami    Show who you are, on which service, and how you are authenticated.
+  init      Create an mdf.yaml manifest for a dataset directory.
+  doctor    Check your setup: service, connectivity, login, and the local mdf.yaml.
 
-   Auth & Setup
-  setup    Configure defaults and create a manifest.
-  login    Authenticate with Globus.
-  logout   Clear cached credentials.
-  status   Check submission or auth status.
+   Find & reuse
+  search    Search public datasets.
+  show      Show dataset details.
+  cite      Get citation for a dataset.
+  clone     Download a dataset from MDF.
+  related   List datasets related to a given dataset.
+  versions  Show version history for a dataset.
 
-   Publish & Download
-  publish  Publish a dataset to MDF Connect.
-  clone    Download a dataset from MDF.
-  import   Import a dataset from an external repository or a DataCite DOI.
+   Publish
+  check     Run every check `mdf publish --submit` runs, without uploading anything.
+  publish   Publish a dataset to MDF Connect.
+  status    Check a submission's status (default: your last publish).
+  list      List your submitted datasets.
+  import    Import a dataset from an external repository or a DataCite DOI.
 
-   Explore
-  search   Search public datasets and streams.
-  list     List your submitted datasets.
-  related  List datasets related to a given dataset.
-  show     Show dataset details.
+   Manage
+  dataset   Manage your datasets: edit, withdraw, resubmit, diff, open
 
    More
-  dataset  Dataset utilities (cite, open, preview, versions, ...)
-  admin    Curation and admin commands
-  config   Manage configuration
-  skill    Install the packaged MDF agent skills (Claude, Codex, Gemini)
+  admin     Curation and admin commands
+  config    Show and change CLI defaults (~/.config/mdf/config.json)
+  manifest  Manage mdf.yaml manifest files
+  skill     Install the packaged MDF agent skills (Claude, Codex, Gemini)
+  mcp       Model Context Protocol server for AI assistants
 
 

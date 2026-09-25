@@ -7,7 +7,6 @@
   --help          Show this message and exit.
 
    Commands
-  init      Create an mdf.yaml manifest for a dataset directory.
   discover  Extract metadata from data files and save to mdf.yaml.
   inspect   Show a readable summary of the current manifest.
 

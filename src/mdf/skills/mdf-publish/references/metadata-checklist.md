@@ -4,7 +4,7 @@ This is the field-by-field contract for writing `mdf.yaml`. For each key: what i
 which v2 metadata field it becomes, what evidence justifies it, and what will bite you.
 
 This file mirrors the server's `DatasetMetadata` Pydantic model, but it is a copy.
-`mdf validate --json --service staging` runs client-side manifest/preflight checks;
+`mdf check --json --service staging` runs client-side manifest/preflight checks;
 the **server's validation at submit time and the `mdf publish` dry-run payload are the
 ground truth**. If they disagree with this document, trust them and tell the user the
 skill needs a refresh.
@@ -50,7 +50,7 @@ Pitfalls, in order of how often they bite:
    what DataCite expects.
 3. **`orcid` must be the bare ID** — `0000-0002-1825-0097`. Do **not** prefix
    `https://orcid.org/`; the server adds it when building the DataCite record. A URL
-   here produces a doubled prefix. (`mdf validate` warns about this.)
+   here produces a doubled prefix. (`mdf check` warns about this.)
 4. **Affiliations come from the README or the paper only.** Never infer an institution
    from an email domain, a name, or general knowledge.
 5. Author order is meaningful — preserve the paper's order.
@@ -184,7 +184,7 @@ repository (Zenodo, Figshare, NOMAD) and this is a mirror.
 ### `ml:` → `ml`
 Draft this whenever the data is tabular or otherwise ML-shaped. **It is all-or-nothing:
 if you write an `ml:` block at all, `data_format` is required** — the server rejects the
-block without it, and `mdf validate` warns you first.
+block without it, and `mdf check` warns you first.
 
 ```yaml
 ml:

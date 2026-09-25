@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from mdf.importers.base import ExternalRepoAdapter
+from mdf.importers.base import ExternalImportError, ExternalRecordNotFoundError, ExternalRepoAdapter
 
 # Matches zenodo:12345 or https://zenodo.org/records/12345 or https://zenodo.org/record/12345
 _ZENODO_RE = re.compile(
@@ -42,7 +42,10 @@ class ZenodoAdapter(ExternalRepoAdapter):
 
         with httpx.Client(timeout=30.0) as client:
             resp = client.get(url)
-            resp.raise_for_status()
+            if resp.status_code in (404, 410):
+                raise ExternalRecordNotFoundError(f"Zenodo has no public record {record_id}")
+            if resp.status_code >= 400:
+                raise ExternalImportError(f"Zenodo answered HTTP {resp.status_code} for record {record_id}")
             data = resp.json()
 
         metadata = data.get("metadata", {})

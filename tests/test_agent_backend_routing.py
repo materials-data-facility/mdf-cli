@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from mdf.core.agent import MDFAgent
-from mdf.skill import handlers as skill_handlers
 
 
 class _FakeClient:
@@ -95,63 +94,3 @@ def test_agent_publish_legacy_authorizer_extracts_token(monkeypatch):
     result = agent.publish(dry_run=False, authorizer=_DummyAuthorizer())
     assert result["success"] is True
     assert captured["token"] == "legacy-token"
-
-
-def test_agent_stream_helpers_use_authenticated_client(monkeypatch):
-    fake_client = _FakeClient()
-    captured: list[Dict[str, Any]] = []
-
-    def fake_authenticated(*, base_url=None, token=None, service_instance="prod", dev_user_id=None):
-        captured.append(
-            {
-                "base_url": base_url,
-                "token": token,
-                "service_instance": service_instance,
-                "dev_user_id": dev_user_id,
-            }
-        )
-        return fake_client
-
-    monkeypatch.setattr("mdf.core.agent.BackendClient.authenticated", fake_authenticated)
-    agent = MDFAgent()
-
-    agent.stream_create("title", api_url="http://localhost", token="t", service_instance="local", dev_user_id="u")
-    agent.stream_append("s1", file_count=1, total_bytes=10, token="t", service_instance="dev")
-    agent.stream_status("s1", token="t")
-    agent.stream_close("s1", token="t")
-    agent.stream_snapshot("s1", title="snap", token="t")
-
-    assert len(captured) == 5
-    assert all(item["token"] == "t" for item in captured)
-
-
-def test_skill_stream_handlers_use_authenticated_client(monkeypatch):
-    fake_client = _FakeClient()
-    captured: Dict[str, Any] = {}
-
-    def fake_authenticated(*, base_url=None, token=None, service_instance="prod", dev_user_id=None):
-        captured.update(
-            base_url=base_url,
-            token=token,
-            service_instance=service_instance,
-            dev_user_id=dev_user_id,
-        )
-        return fake_client
-
-    monkeypatch.setattr("mdf.skill.handlers.BackendClient.authenticated", fake_authenticated)
-    # Streams are disabled in this release (backend router unmounted): the
-    # agent-facing handler must refuse before touching the network, and refuse
-    # via the standard envelope rather than by raising (it is @agent_safe).
-    result = skill_handlers.stream_create(
-        "title",
-        api_url="https://api.example",
-        token="token-1",
-        service_instance="dev",
-        dev_user_id="dev-user",
-    )
-    assert result["success"] is False
-    assert result["kind"] == "feature_unavailable"
-    assert "Streams are disabled" in result["error"]
-    assert captured == {}
-
-

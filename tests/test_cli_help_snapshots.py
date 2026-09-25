@@ -23,8 +23,7 @@ from mdf.cli.main import app
 
 SNAPSHOTS = Path(__file__).parent / "fixtures" / "help"
 UPDATE = os.environ.get("MDF_UPDATE_HELP_SNAPSHOTS") == "1"
-#: Hidden dev groups scheduled for deletion (CLI-D4) are not snapshotted.
-EXCLUDED_GROUPS = {"backend", "stream"}
+EXCLUDED_GROUPS: set = set()
 
 runner = CliRunner()
 
@@ -55,7 +54,7 @@ def _snapshot_name(path: List[str]) -> str:
 
 def test_every_visible_sub_app_is_covered():
     covered = {tuple(path) for path in GROUPS}
-    assert {(), ("dataset",), ("admin",), ("config",), ("skill",), ("mcp",)} <= covered
+    assert {(), ("dataset",), ("admin",), ("config",), ("manifest",), ("skill",), ("mcp",)} <= covered
 
 
 @pytest.mark.parametrize("path", GROUPS, ids=lambda path: " ".join(["mdf", *path]))

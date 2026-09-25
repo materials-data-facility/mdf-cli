@@ -8,7 +8,6 @@ from mdf.auth import globus
 from mdf.core import config as core_config
 from mdf.core.agent import MDFAgent
 from mdf.core.backend_client import BackendClient, _V2_API_URLS, _api_url_for_service
-from mdf.skill import handlers as skill_handlers
 
 
 def test_v2_api_url_map_is_pinned():
@@ -77,19 +76,6 @@ def test_agent_default_uses_resolver(monkeypatch):
     )
 
     result = MDFAgent().search("query")
-    assert result["base_url"] == _V2_API_URLS["dev"]
-
-
-def test_skill_handler_default_uses_resolver(monkeypatch):
-    monkeypatch.setenv("MDF_CONNECT_TOKEN", "test-token")
-    monkeypatch.setattr(core_config, "resolve_service", lambda explicit: explicit or "dev")
-    monkeypatch.setattr(
-        BackendClient,
-        "health",
-        lambda self: {"success": True, "base_url": self.base_url},
-    )
-
-    result = skill_handlers.health_check()
     assert result["base_url"] == _V2_API_URLS["dev"]
 
 

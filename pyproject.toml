@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mdf-cli"
 dynamic = ["version"]
-description = "Modern MDF Connect client with CLI, Python API, and Claude skill integration."
+description = "Materials Data Facility CLI and Python client: search, cite, clone and publish materials datasets; MCP server and agent skill included."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -52,7 +52,7 @@ package-dir = {"" = "src"}
 include-package-data = true
 
 [tool.setuptools.package-data]
-mdf = ["skills/**/*.md", "skill/*.md"]
+mdf = ["skills/**/*.md"]
 
 [tool.setuptools.dynamic]
 version = {attr = "mdf.version.__version__"}

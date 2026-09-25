@@ -545,7 +545,7 @@ def _transfer_result(**overrides) -> Dict[str, Any]:
 def test_render_partial_transfer_shows_errors_and_all_task_ids(capsys):
     import typer
 
-    from mdf.cli import main as cli_main
+    from mdf.cli.commands import clone as cli_main
 
     with pytest.raises(typer.Exit) as excinfo:
         cli_main._render_clone_result(_transfer_result())
@@ -560,7 +560,7 @@ def test_render_partial_transfer_shows_errors_and_all_task_ids(capsys):
 
 
 def test_render_successful_transfer_shows_every_task_id(capsys):
-    from mdf.cli import main as cli_main
+    from mdf.cli.commands import clone as cli_main
 
     cli_main._render_clone_result(
         _transfer_result(success=True, partial=False, errors=None, failed_count=0)
@@ -573,7 +573,7 @@ def test_render_successful_transfer_shows_every_task_id(capsys):
 
 def test_render_success_still_reports_partial_and_errors(capsys):
     """A success envelope carrying `partial`/`errors` must not hide them."""
-    from mdf.cli import main as cli_main
+    from mdf.cli.commands import clone as cli_main
 
     cli_main._render_clone_result(
         _transfer_result(success=True, partial=True, errors=["globus://ep-3/x/: boom"])

@@ -22,7 +22,7 @@ class TestManifestInitCommand:
         with TemporaryDirectory() as tmpdir:
             result = runner.invoke(
                 app,
-                ["manifest", "init", tmpdir, "--title", "Test Dataset", "--author", "Jane Doe"],
+                ["init", tmpdir, "--title", "Test Dataset", "--author", "Jane Doe"],
             )
             assert result.exit_code == 0
             assert "Created mdf.yaml" in result.stdout
@@ -36,7 +36,7 @@ class TestManifestInitCommand:
             result = runner.invoke(
                 app,
                 [
-                    "manifest", "init", tmpdir,
+                    "init", tmpdir,
                     "--title", "Test Dataset",
                     "--author", "Jane Doe",
                     "--author", "John Smith",
@@ -54,7 +54,7 @@ class TestManifestInitCommand:
             result = runner.invoke(
                 app,
                 [
-                    "manifest", "init", tmpdir,
+                    "init", tmpdir,
                     "--title", "Test Dataset",
                     "--author", "Jane Doe",
                     "--description", "A test dataset",
@@ -76,7 +76,7 @@ class TestManifestInitCommand:
         with TemporaryDirectory() as tmpdir:
             result = runner.invoke(
                 app,
-                ["manifest", "init", tmpdir, "--author", "Jane Doe"],
+                ["init", tmpdir, "--author", "Jane Doe"],
             )
             assert result.exit_code != 0
 
@@ -85,7 +85,7 @@ class TestManifestInitCommand:
         with TemporaryDirectory() as tmpdir:
             result = runner.invoke(
                 app,
-                ["manifest", "init", tmpdir, "--title", "Test"],
+                ["init", tmpdir, "--title", "Test"],
             )
             assert result.exit_code != 0
 
@@ -95,41 +95,33 @@ class TestManifestInitCommand:
             (Path(tmpdir) / "mdf.yaml").write_text("title: Existing\n")
             result = runner.invoke(
                 app,
-                ["manifest", "init", tmpdir, "--title", "New", "--author", "Jane"],
+                ["init", tmpdir, "--title", "New", "--author", "Jane"],
             )
             assert result.exit_code != 0
             assert "already exists" in result.stdout
 
 
-class TestValidateCommand:
-    """Tests for 'mdf validate' command."""
+class TestCheckCommand:
+    """Tests for 'mdf check' (was 'mdf validate' / 'publish --preflight-only')."""
 
-    def test_validate_valid_manifest(self):
-        """mdf validate passes for valid manifest."""
+    def test_check_valid_manifest(self, monkeypatch):
+        """mdf check runs the submit-time checks on the manifest in cwd."""
+        seen = {}
+
+        def fake_preflight(manifest, **kwargs):
+            seen["title"] = manifest.title
+            seen["submit"] = kwargs.get("submit")
+            return {"success": True, "issues": [], "source_summary": {}}
+
+        monkeypatch.setattr("mdf.cli.commands.publish.run_preflight", fake_preflight)
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "data.csv").write_text("a,b,c")
-
-            # Create manifest with data source
-            runner.invoke(
-                app,
-                ["manifest", "init", str(root), "--title", "Test", "--author", "Jane"],
-            )
-
-            import yaml
-            manifest_path = root / "mdf.yaml"
-            manifest = yaml.safe_load(manifest_path.read_text())
-            manifest["data_sources"] = ["./data.csv"]
-            manifest_path.write_text(yaml.safe_dump(manifest))
-
-            original_cwd = os.getcwd()
-            try:
-                os.chdir(root)
-                result = runner.invoke(app, ["validate"])
-                assert result.exit_code == 0
-                assert "Validation passed" in result.stdout
-            finally:
-                os.chdir(original_cwd)
+            runner.invoke(app, ["init", str(root), "--title", "Test", "--author", "Jane"])
+            monkeypatch.chdir(root)
+            result = runner.invoke(app, ["check"])
+            assert result.exit_code == 0, result.output
+            assert seen == {"title": "Test", "submit": True}
 
 
 class TestPublishCommand:
@@ -157,7 +149,7 @@ class TestPublishCommand:
 
             runner.invoke(
                 app,
-                ["manifest", "init", str(root), "--title", "Test", "--author", "Jane"],
+                ["init", str(root), "--title", "Test", "--author", "Jane"],
             )
 
             import yaml
@@ -200,7 +192,7 @@ class TestCloneCommand:
 
     def test_clone_renders_plan_and_success_summary(self, monkeypatch):
         monkeypatch.setattr(
-            "mdf.cli.main.MDFAgent.plan_clone",
+            "mdf.core.agent.MDFAgent.plan_clone",
             lambda self, **kwargs: {
                 "success": True,
                 "requested_identifier": "src-1",
@@ -216,7 +208,7 @@ class TestCloneCommand:
             },
         )
         monkeypatch.setattr(
-            "mdf.cli.main.MDFAgent.clone",
+            "mdf.core.agent.MDFAgent.clone",
             lambda self, **kwargs: {
                 "success": True,
                 "method": "zip",
@@ -236,7 +228,7 @@ class TestCloneCommand:
 
     def test_clone_partial_failure_lists_failed_files(self, monkeypatch):
         monkeypatch.setattr(
-            "mdf.cli.main.MDFAgent.plan_clone",
+            "mdf.core.agent.MDFAgent.plan_clone",
             lambda self, **kwargs: {
                 "success": True,
                 "requested_identifier": "src-1",
@@ -252,7 +244,7 @@ class TestCloneCommand:
             },
         )
         monkeypatch.setattr(
-            "mdf.cli.main.MDFAgent.clone",
+            "mdf.core.agent.MDFAgent.clone",
             lambda self, **kwargs: {
                 "success": False,
                 "partial": True,
@@ -273,110 +265,74 @@ class TestCloneCommand:
 
 
 class TestCLIHelp:
-    """Tests for CLI help output."""
+    """Tests for CLI help output (the target command tree, plan Lane C)."""
 
     def test_main_help(self):
-        """mdf --help shows organized panels with 11 visible items."""
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        assert "Publish & Download" in result.stdout
-        assert "Explore" in result.stdout
-        assert "Auth & Setup" in result.stdout
-        assert "More" in result.stdout
-        assert "│ stream" not in result.stdout.lower()
+        for panel in ("Get started", "Find & reuse", "Publish", "Manage", "More"):
+            assert panel in result.stdout
+        assert "stream" not in result.stdout.lower()
+        assert "MDF Agent" not in result.stdout
 
-    def test_stream_commands_are_hidden_from_help(self):
-        backend_help = runner.invoke(app, ["backend", "--help"])
-        stream_help = runner.invoke(app, ["stream", "--help"])
+    def test_removed_surfaces_are_gone(self):
+        """C8 clean break: dev groups, aliases and renamed commands no longer exist."""
+        for argv in (
+            ["backend", "--help"], ["stream", "--help"], ["setup", "--help"],
+            ["validate", "--help"], ["watch", "--help"], ["update", "--help"],
+            ["preview", "--help"], ["approve", "--help"], ["config", "doctor", "--help"],
+            ["config", "manifest", "--help"], ["dataset", "cite", "--help"],
+            ["dataset", "versions", "--help"], ["dataset", "preview", "--help"],
+        ):
+            assert runner.invoke(app, argv).exit_code != 0, argv
+        assert runner.invoke(app, ["publish", "--preflight-only"]).exit_code == 2
+        assert runner.invoke(app, ["status", "--auth"]).exit_code == 2
 
-        assert backend_help.exit_code == 0
-        assert "stream-create" not in backend_help.stdout
-        assert "stream-append" not in backend_help.stdout
-        assert "stream-status" not in backend_help.stdout
-        assert "stream-close" not in backend_help.stdout
-        assert "stream-snapshot" not in backend_help.stdout
-        assert stream_help.exit_code == 0
-        assert " upload " not in stream_help.stdout
-        assert " create " not in stream_help.stdout
-
-    def test_first_run_panel_mentions_setup(self, monkeypatch):
+    def test_first_run_panel_orders_find_publish_agents(self, monkeypatch):
         with TemporaryDirectory() as tmpdir:
             monkeypatch.setenv("HOME", tmpdir)
             result = runner.invoke(app, [])
             assert result.exit_code == 0
-            assert "mdf setup" in result.stdout
+            out = result.stdout
+            assert out.index("Find data") < out.index("\nPublish\n") < out.index("\nAgents\n")
+            assert out.index("mdf login") < out.index("mdf publish --submit")
+            assert "mdf setup" not in out
 
     def test_manifest_help(self):
-        """mdf manifest --help shows subcommands."""
         result = runner.invoke(app, ["manifest", "--help"])
         assert result.exit_code == 0
-        assert "init" in result.stdout
         assert "discover" in result.stdout
+        assert "inspect" in result.stdout
 
     def test_publish_help(self):
-        """mdf publish --help shows options."""
         result = runner.invoke(app, ["publish", "--help"])
         assert result.exit_code == 0
-        assert "--test" in result.stdout or "--dry-run" in result.stdout
+        assert "--dry-run" in result.stdout
+        assert "--preflight-only" not in result.stdout
+        assert "--dev-user" not in result.stdout  # hidden
 
-    def test_validate_help(self):
-        """mdf validate --help shows usage (hidden but functional)."""
-        result = runner.invoke(app, ["validate", "--help"])
-        assert result.exit_code == 0
-
-    def test_clone_help(self):
-        """mdf clone --help shows options."""
-        result = runner.invoke(app, ["clone", "--help"])
-        assert result.exit_code == 0
-
-    def test_init_command_exists(self):
-        """mdf init is a hidden alias that still works."""
-        result = runner.invoke(app, ["init", "--help"])
-        assert result.exit_code == 0
+    def test_top_level_commands_have_help(self):
+        for cmd in ("init", "check", "whoami", "doctor", "cite", "versions", "clone"):
+            assert runner.invoke(app, [cmd, "--help"]).exit_code == 0, cmd
 
     def test_dataset_subapp_help(self):
-        """mdf dataset --help shows dataset utility commands."""
         result = runner.invoke(app, ["dataset", "--help"])
         assert result.exit_code == 0
-        assert "cite" in result.stdout
-        assert "open" in result.stdout
-        assert "preview" in result.stdout
-        assert "versions" in result.stdout
+        for sub in ("edit", "withdraw", "resubmit", "diff", "open"):
+            assert sub in result.stdout
 
     def test_admin_subapp_help(self):
-        """mdf admin --help shows curation commands."""
         result = runner.invoke(app, ["admin", "--help"])
         assert result.exit_code == 0
         assert "pending" in result.stdout
         assert "approve" in result.stdout
         assert "reject" in result.stdout
 
-    def test_config_doctor_help(self):
-        """mdf config doctor --help works."""
-        result = runner.invoke(app, ["config", "doctor", "--help"])
-        assert result.exit_code == 0
-
-    def test_config_manifest_help(self):
-        """mdf config manifest --help works."""
-        result = runner.invoke(app, ["config", "manifest", "--help"])
-        assert result.exit_code == 0
-        assert "init" in result.stdout
-
-    def test_hidden_aliases_work(self):
-        """Old top-level commands still work as hidden aliases."""
-        for cmd in ["cite", "open", "preview", "versions", "watch", "doctor"]:
-            result = runner.invoke(app, [cmd, "--help"])
-            assert result.exit_code == 0, f"Hidden alias '{cmd}' should still work"
-
     def test_no_add_command(self):
-        """mdf add is no longer a command."""
-        result = runner.invoke(app, ["add", "--help"])
-        assert result.exit_code != 0
+        assert runner.invoke(app, ["add", "--help"]).exit_code != 0
 
     def test_no_commit_command(self):
-        """mdf commit is no longer a command."""
-        result = runner.invoke(app, ["commit", "--help"])
-        assert result.exit_code != 0
+        assert runner.invoke(app, ["commit", "--help"]).exit_code != 0
 
 
 class TestAuthCommands:
@@ -447,15 +403,6 @@ class TestAuthCommands:
         assert "authenticated" in result.stdout
         assert "MDF_CONNECT_TOKEN is set in environment" in result.stdout
 
-    def test_status_auth_flag(self, monkeypatch):
-        """mdf status --auth shows identity info (absorbs whoami)."""
-        monkeypatch.setattr("mdf.auth.globus.is_logged_in", lambda service_instance="prod": False)
-        monkeypatch.setenv("MDF_CONNECT_TOKEN", "env-token")
-        result = runner.invoke(app, ["status", "--auth", "--service", "prod"])
-        assert result.exit_code == 0
-        assert "authenticated" in result.stdout
-        assert "MDF_CONNECT_TOKEN is set in environment" in result.stdout
-
     # CLI-U10 / C6 -------------------------------------------------------
 
     @staticmethod
@@ -495,15 +442,22 @@ class TestAuthCommands:
         monkeypatch.delenv("MDF_CONNECT_TOKEN", raising=False)
         monkeypatch.delenv("MDF_CLIENT_ID", raising=False)
         monkeypatch.delenv("MDF_DEV_USER_ID", raising=False)
+        # No cached Globus login (it would take precedence over the saved token).
+        monkeypatch.setattr("mdf.auth.globus.is_logged_in", lambda **kwargs: False)
         self._auth_check_ok(monkeypatch, {"success": True, "name": "Jane Doe"})
         result = runner.invoke(app, ["login", "--token", "tok-2", "--save"])
         assert result.exit_code == 0, result.stdout
         path = saved_token_path()
-        assert path.read_text().strip() == "tok-2"
+        assert list(json.loads(path.read_text()).values()) == ["tok-2"]
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        # Later commands pick it up without a Globus login...
+        # Later commands on the same service pick it up without a Globus login...
         assert BackendClient.authenticated(service_instance="staging")._token == "tok-2"
-        status = runner.invoke(app, ["status", "--auth", "--json"])
+        # ...but it is never sent to another service.
+        from mdf.core.config import load_saved_token
+
+        assert load_saved_token("https://api-dev.materialsdatafacility.org") is None
+        assert BackendClient.authenticated(service_instance="local")._token is None
+        status = runner.invoke(app, ["whoami", "--json"])
         assert json.loads(status.stdout)["method"] == "saved token (mdf login --token --save)"
         # ...and logout removes it, printing one message.
         monkeypatch.setattr("mdf.auth.globus.logout", lambda: False)
@@ -521,8 +475,12 @@ class TestAuthCommands:
         """CliRunner stdin is not a TTY: interactive login must fail fast (exit 4)."""
         from mdf.core.exceptions import AuthRequired
 
+        from mdf.auth import globus as globus_auth
+
         def fake_get_authorizer_for_scopes(scopes, no_browser=False, interactive=None):
-            assert interactive is False
+            # The root policy (no TTY) is in force, not a per-command override.
+            assert interactive is None
+            assert globus_auth._INTERACTIVE_DEFAULT.get() is False
             raise AuthRequired()
 
         monkeypatch.setattr("mdf.auth.globus.get_authorizer_for_scopes", fake_get_authorizer_for_scopes)
@@ -530,72 +488,66 @@ class TestAuthCommands:
         assert result.exit_code == 4
         assert "needs a terminal" in result.stdout
 
-    def test_status_auth_reports_identity(self, monkeypatch):
+    def test_whoami_reports_a_rejected_token_as_invalid(self, monkeypatch):
+        monkeypatch.setenv("MDF_CONNECT_TOKEN", "expired")
+        monkeypatch.setattr("mdf.cli.commands.auth._fetch_identity", lambda **kwargs: {"rejected": "true"})
+        result = runner.invoke(app, ["whoami", "--json"])
+        assert result.exit_code == 4
+        payload = json.loads(result.stdout)
+        assert payload["error"]["message"] == "Credentials rejected"
+        assert payload["status"] == "credentials rejected"
+
+    def test_whoami_reports_identity(self, monkeypatch):
         monkeypatch.setenv("MDF_CONNECT_TOKEN", "env-token")
         monkeypatch.setattr(
-            "mdf.cli.main._fetch_identity",
+            "mdf.cli.commands.auth._fetch_identity",
             lambda **kwargs: {"name": "Jane Doe", "email": "jane@example.org"},
         )
-        human = runner.invoke(app, ["status", "--auth", "--service", "staging"])
+        human = runner.invoke(app, ["whoami", "--service", "staging"])
         assert "Jane Doe <jane@example.org>" in human.stdout
-        payload = json.loads(runner.invoke(app, ["status", "--auth", "--json"]).stdout)
+        payload = json.loads(runner.invoke(app, ["whoami", "--json"]).stdout)
         assert payload["name"] == "Jane Doe" and payload["email"] == "jane@example.org"
 
 
-class TestSetupAndManifestUX:
-    def test_setup_writes_config_without_creating_manifest(self, monkeypatch):
-        with TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir) / "home"
-            dataset = Path(tmpdir) / "dataset"
-            dataset.mkdir()
-            monkeypatch.setenv("HOME", str(home))
+class TestInitAndManifestUX:
+    """`mdf init` replaces `setup` + `manifest init` (C8)."""
 
-            result = runner.invoke(
-                app,
-                ["setup", str(dataset)],
-                input="My Org\nMy Publisher\n\nn\n",
-            )
+    def test_init_without_a_terminal_fails_fast_instead_of_prompting(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        result = runner.invoke(app, ["init", str(tmp_path), "--title", "T"])
+        assert result.exit_code == 2
+        assert "--author" in result.stdout and "not a terminal" in result.stdout
+        assert not (tmp_path / "mdf.yaml").exists()
 
-            assert result.exit_code == 0
-            config_path = home / ".config" / "mdf" / "config.json"
-            assert config_path.exists()
-            config = json.loads(config_path.read_text())
-            # CLI-U10: setup never pins the service; the release default applies.
-            assert "service" not in config.get("defaults", {})
-            assert config["user"]["organization"] == "My Org"
-            assert config["user"]["publisher"] == "My Publisher"
-            assert not (dataset / "mdf.yaml").exists()
+    def test_init_prompts_on_a_terminal_and_never_pins_the_service(self, tmp_path, monkeypatch):
+        import yaml
 
-    def test_setup_creates_publishable_manifest_and_prints_real_next_step(self, monkeypatch):
-        with TemporaryDirectory() as tmpdir:
-            home = Path(tmpdir) / "home"
-            dataset = Path(tmpdir) / "dataset"
-            dataset.mkdir()
-            monkeypatch.setenv("HOME", str(home))
+        home = tmp_path / "home"
+        dataset = tmp_path / "dataset"
+        dataset.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        # Pretend a person is at the keyboard (CliRunner's stdin is not a TTY).
+        from types import SimpleNamespace
 
-            result = runner.invoke(
-                app,
-                ["setup", str(dataset)],
-                input=(
-                    "My Org\n"
-                    "My Publisher\n"
-                    "me@example.org\n"
-                    "y\n"
-                    "My Dataset\n"
-                    "Jane Doe\n"
-                    "A useful dataset\n"
-                ),
-            )
-
-            assert result.exit_code == 0
-            import yaml
-
-            manifest = yaml.safe_load((dataset / "mdf.yaml").read_text())
-            assert manifest["title"] == "My Dataset"
-            assert manifest["authors"] == ["Jane Doe"]
-            assert manifest["description"] == "A useful dataset"
-            assert "mdf manifest inspect" in result.stdout
-            assert "mdf config manifest inspect" not in result.stdout
+        monkeypatch.setattr(
+            "mdf.cli.manifest_cmd.sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
+        )
+        result = runner.invoke(
+            app,
+            ["init", str(dataset)],
+            input="My Dataset\nDoe, Jane\n\nA useful dataset\nMy Org\nxrd, dft\nCC-BY-4.0\n",
+        )
+        assert result.exit_code == 0, result.output
+        manifest = yaml.safe_load((dataset / "mdf.yaml").read_text())
+        assert manifest["title"] == "My Dataset"
+        assert manifest["authors"] == ["Doe, Jane"]
+        assert manifest["description"] == "A useful dataset"
+        assert manifest["subjects"] == ["xrd", "dft"]
+        assert manifest["license"] == "CC-BY-4.0"
+        assert "mdf check" in result.stdout
+        # CLI-U10: nothing pins the service.
+        config = home / ".config" / "mdf" / "config.json"
+        assert not config.exists() or "service" not in json.loads(config.read_text()).get("defaults", {})
 
     def test_manifest_discover_preview_does_not_mutate_manifest(self):
         with TemporaryDirectory() as tmpdir:
@@ -604,7 +556,7 @@ class TestSetupAndManifestUX:
 
             init_result = runner.invoke(
                 app,
-                ["manifest", "init", str(root), "--title", "Test", "--author", "Jane Doe"],
+                ["init", str(root), "--title", "Test", "--author", "Jane Doe"],
             )
             assert init_result.exit_code == 0
             manifest_path = root / "mdf.yaml"
@@ -628,7 +580,7 @@ class TestSetupAndManifestUX:
 
             runner.invoke(
                 app,
-                ["manifest", "init", str(root), "--title", "Test", "--author", "Jane Doe"],
+                ["init", str(root), "--title", "Test", "--author", "Jane Doe"],
             )
 
             import yaml
@@ -644,7 +596,7 @@ class TestSetupAndManifestUX:
             assert "./data.csv" in result.stdout
 
 
-class TestListAndStreamRegressions:
+class TestListRegressions:
     def test_list_json_applies_filters_and_limit(self, monkeypatch):
         seen = {}
 
@@ -696,7 +648,7 @@ class TestListAndStreamRegressions:
                 return None
 
         monkeypatch.setattr(
-            "mdf.cli.main.BackendClient.authenticated",
+            "mdf.core.backend_client.BackendClient.authenticated",
             lambda **kwargs: FakeClient(),
         )
 
@@ -709,7 +661,6 @@ class TestListAndStreamRegressions:
                 "published",
                 "--search",
                 "target",
-                "--latest-only",
                 "--limit",
                 "1",
             ],
@@ -728,52 +679,9 @@ class TestListAndStreamRegressions:
         assert seen["limit"] == 50  # --search needs full pages to filter over
         assert seen["start_key"] is None
 
-    def test_stream_disabled_warning_exits_nonzero(self):
-        result = runner.invoke(
-            app,
-            ["stream", "upload", "--stream-id", "stream-1", "missing.csv"],
-        )
-        assert result.exit_code == 1
-        assert "file streaming is disabled in the current MDF release" in result.stdout
-
-    def test_backend_stream_command_is_disabled(self):
-        result = runner.invoke(
-            app,
-            ["backend", "stream-create", "--title", "Lab run"],
-        )
-        assert result.exit_code == 1
-        assert "file streaming is disabled in the current MDF release" in result.stdout
-
-    def test_stream_upload_exits_nonzero_when_file_fails(self, monkeypatch, tmp_path):
-        from mdf.cli import stream as stream_cli
-
-        data_file = tmp_path / "data.csv"
-        data_file.write_text("a,b\n1,2\n")
-
-        class FakeClient:
-            def stream_upload(self, stream_id, filename, content):
-                return {"success": False, "error": "upload rejected"}
-
-            def close(self):
-                return None
-
-        monkeypatch.setattr(stream_cli, "STREAMING_ENABLED", True)
-        monkeypatch.setattr(
-            "mdf.cli.stream.BackendClient.authenticated",
-            lambda **kwargs: FakeClient(),
-        )
-
-        result = runner.invoke(
-            app,
-            ["stream", "upload", "--stream-id", "stream-1", str(data_file)],
-        )
-
-        assert result.exit_code == 1
-        assert "upload rejected" in result.stdout
-
 
 class TestPreflightAndIdentifiers:
-    def test_publish_preflight_only_renders_without_submission(self, monkeypatch):
+    def test_check_renders_preflight_without_submission(self, monkeypatch):
         fake_preflight = {
             "success": True,
             "issues": [],
@@ -782,14 +690,14 @@ class TestPreflightAndIdentifiers:
             "source_summary": {"files": 1, "bytes": 3},
             "sources": [{"source": "./data.csv", "kind": "local", "file_count": 1, "total_bytes": 3}],
         }
-        monkeypatch.setattr("mdf.cli.main.run_preflight", lambda *args, **kwargs: fake_preflight)
+        monkeypatch.setattr("mdf.cli.commands.publish.run_preflight", lambda *args, **kwargs: fake_preflight)
 
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "data.csv").write_text("a,b")
             result = runner.invoke(
                 app,
-                ["publish", str(root / "data.csv"), "--title", "Test", "--author", "Jane", "--preflight-only"],
+                ["check", str(root / "data.csv"), "--title", "Test", "--author", "Jane"],
             )
 
         assert result.exit_code == 0
@@ -813,7 +721,7 @@ class TestPreflightAndIdentifiers:
                     }
                 }
 
-        monkeypatch.setattr("mdf.cli.main.BackendClient.authenticated", lambda **kwargs: FakeClient())
+        monkeypatch.setattr("mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: FakeClient())
         result = runner.invoke(app, ["status", "src-1"])
         assert result.exit_code == 0
         assert "Missing methods" in result.stdout
@@ -851,7 +759,7 @@ class TestPreflightAndIdentifiers:
 
         # `show` is a public read and now builds its client via read_client()
         # (no forced interactive login). Patch that seam.
-        monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: FakeClient())
+        monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: FakeClient())
         result = runner.invoke(app, ["show", "10.1234/example"])
         assert result.exit_code == 0
         assert seen["card_id"] == "src-resolved"

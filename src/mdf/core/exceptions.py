@@ -1,8 +1,8 @@
-"""Custom exceptions for MDF Agent."""
+"""Custom exceptions for MDF CLI."""
 
 
 class MDFError(Exception):
-    """Base exception for MDF Agent errors."""
+    """Base exception for MDF CLI errors."""
 
     pass
 

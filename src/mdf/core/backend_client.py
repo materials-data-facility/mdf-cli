@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote
 
 import httpx
 
@@ -122,10 +121,11 @@ class BackendClient:
         2. MDF_CONNECT_TOKEN env var
         3. MDF_CLIENT_ID + MDF_CLIENT_SECRET env vars (confidential client flow)
         4. dev_user_id / MDF_DEV_USER_ID env var (X-User-Id)
-        5. A token saved by ``mdf login --token T --save``
-        6. Cached Globus login, or an interactive Globus OAuth2 login
+        5. A usable cached Globus login
+        6. A token saved by ``mdf login --token T --save`` for this same API URL
+        7. An interactive Globus OAuth2 login
 
-        ``interactive`` controls step 6 when no cached login exists: ``True``
+        ``interactive`` controls step 7 when no cached login exists: ``True``
         prompts (on stderr), ``False`` raises
         :class:`mdf.core.exceptions.AuthRequired`, and ``None`` (default)
         follows :func:`mdf.auth.globus.interactive_login`, which prompts unless
@@ -185,9 +185,15 @@ class BackendClient:
             # Local dev backends commonly run in AUTH_MODE=dev and can derive a default user.
             return cls(base_url=url)
 
-        saved_token = core_config.load_saved_token()
+        # A saved token is only for the exact API URL it was validated against,
+        # and a usable cached Globus login (which also carries the data,
+        # transfer and groups tokens) takes precedence over it.
+        saved_token = core_config.load_saved_token(url)
         if saved_token:
-            return cls(base_url=url, token=saved_token)
+            from mdf.auth.globus import is_logged_in
+
+            if not is_logged_in(service_instance=resolved_service):
+                return cls(base_url=url, token=saved_token)
 
         # Lazy import so token/dev-user workflows do not require globus_sdk.
         from mdf.auth.globus import get_authorizer_for_scopes, get_scopes_for_service, DATA_MDF_SCOPE, TRANSFER_SCOPE, GROUPS_SCOPE, NCSA_MDF_COLLECTION_UUID
@@ -321,192 +327,6 @@ class BackendClient:
     def update_status(self, source_id: str, version: str, status: str) -> Dict[str, Any]:
         payload = {"source_id": source_id, "version": version, "status": status}
         return self._request("POST", "/status/update", json_data=payload)
-
-    def stream_create(self, title: str, lab_id: Optional[str] = None, organization: Optional[str] = None) -> Dict[str, Any]:
-        payload = {"title": title}
-        if lab_id:
-            payload["lab_id"] = lab_id
-        if organization:
-            payload["organization"] = organization
-        return self._request("POST", "/stream/create", json_data=payload)
-
-    def stream_append(
-        self,
-        stream_id: str,
-        files: Optional[Any] = None,
-        file_count: Optional[int] = None,
-        total_bytes: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"stream_id": stream_id}
-        if files is not None:
-            payload["files"] = files
-        if file_count is not None:
-            payload["file_count"] = file_count
-        if total_bytes is not None:
-            payload["total_bytes"] = total_bytes
-        return self._request("POST", f"/stream/{stream_id}/append", json_data=payload)
-
-    def stream_status(self, stream_id: str) -> Dict[str, Any]:
-        return self._request("GET", f"/stream/{stream_id}")
-
-    def stream_close(
-        self,
-        stream_id: str,
-        mint_doi: Optional[bool] = None,
-        title: Optional[str] = None,
-        description: Optional[str] = None,
-        authors: Optional[list] = None,
-        keywords: Optional[list] = None,
-        license: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"stream_id": stream_id}
-        if mint_doi is not None:
-            payload["mint_doi"] = mint_doi
-        if title:
-            payload["title"] = title
-        if description:
-            payload["description"] = description
-        if authors is not None:
-            payload["authors"] = authors
-        if keywords is not None:
-            payload["keywords"] = keywords
-        if license:
-            payload["license"] = license
-        return self._request("POST", f"/stream/{stream_id}/close", json_data=payload)
-
-    def stream_snapshot(
-        self,
-        stream_id: str,
-        title: Optional[str] = None,
-        update: bool = False,
-    ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"stream_id": stream_id, "update": update}
-        if title:
-            payload["title"] = title
-        return self._request("POST", f"/stream/{stream_id}/snapshot", json_data=payload)
-
-    def stream_upload(
-        self,
-        stream_id: str,
-        filename: str,
-        content: bytes,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Upload a file to a stream.
-
-        Args:
-            stream_id: The stream ID
-            filename: Name of the file
-            content: File contents as bytes
-            metadata: Optional metadata dict
-        """
-        import base64
-        payload: Dict[str, Any] = {
-            "filename": filename,
-            "content_base64": base64.b64encode(content).decode("ascii"),
-        }
-        if metadata:
-            payload["metadata"] = metadata
-        return self._request("POST", f"/stream/{stream_id}/upload", json_data=payload)
-
-    def stream_upload_batch(
-        self,
-        stream_id: str,
-        files: list,
-    ) -> Dict[str, Any]:
-        """Upload multiple files to a stream.
-
-        Args:
-            stream_id: The stream ID
-            files: List of dicts with filename, content (bytes), and optional metadata
-        """
-        import base64
-        payload_files = []
-        for f in files:
-            pf: Dict[str, Any] = {
-                "filename": f["filename"],
-                "content_base64": base64.b64encode(f["content"]).decode("ascii"),
-            }
-            if f.get("metadata"):
-                pf["metadata"] = f["metadata"]
-            payload_files.append(pf)
-        return self._request("POST", f"/stream/{stream_id}/upload", json_data={"files": payload_files})
-
-    def stream_list_files(self, stream_id: str) -> Dict[str, Any]:
-        """List all files in a stream."""
-        return self._request("GET", f"/stream/{stream_id}/files")
-
-    def stream_get_upload_url(
-        self,
-        stream_id: str,
-        filename: str,
-        content_type: str = "application/octet-stream",
-        expires_in: int = 3600,
-    ) -> Dict[str, Any]:
-        """Get a pre-signed URL for direct file upload.
-
-        For large files (> 6MB), use this to upload directly to storage
-        instead of going through the API.
-
-        Args:
-            stream_id: The stream ID
-            filename: Name of the file
-            content_type: MIME type
-            expires_in: URL expiration time in seconds
-
-        Returns:
-            Dict with url, method, headers, path, expires_in
-        """
-        payload = {
-            "filename": filename,
-            "content_type": content_type,
-            "expires_in": expires_in,
-        }
-        return self._request("POST", f"/stream/{stream_id}/upload-url", json_data=payload)
-
-    def stream_confirm_upload(
-        self,
-        stream_id: str,
-        path: str,
-        size_bytes: int,
-        checksum_md5: str = "",
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Confirm a direct upload completed.
-
-        Call this after uploading directly to storage via the pre-signed URL.
-
-        Args:
-            stream_id: The stream ID
-            path: The path returned from get_upload_url
-            size_bytes: File size in bytes
-            checksum_md5: MD5 checksum of the file
-            metadata: Optional custom metadata
-        """
-        payload: Dict[str, Any] = {
-            "path": path,
-            "size_bytes": size_bytes,
-            "checksum_md5": checksum_md5,
-        }
-        if metadata:
-            payload["metadata"] = metadata
-        return self._request("POST", f"/stream/{stream_id}/upload-confirm", json_data=payload)
-
-    def stream_get_download_url(
-        self,
-        stream_id: str,
-        path: str,
-    ) -> Dict[str, Any]:
-        """Get a download URL for a file.
-
-        Args:
-            stream_id: The stream ID
-            path: Full path to the file
-
-        Returns:
-            Dict with download_url
-        """
-        return self._request("POST", f"/stream/{stream_id}/download-url", json_data={"path": path})
 
     def versions(self, source_id: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
         """Get version history for a dataset."""
@@ -698,24 +518,6 @@ class BackendClient:
         """Curator-only: rebuild just the S3 snapshot from existing embeddings."""
         return self._request("POST", "/admin/embeddings/snapshot", json_data={})
 
-    def stream_preview(
-        self,
-        stream_id: str,
-        filename: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Get preview of files in a stream.
-
-        Args:
-            stream_id: The stream ID
-            filename: Optional specific file to preview
-
-        Returns:
-            Dict with preview data (columns, rows, structure, etc.)
-        """
-        if filename:
-            return self._request("GET", f"/stream/{stream_id}/files/{filename}/preview")
-        return self._request("GET", f"/stream/{stream_id}/preview")
-
     def dataset_preview(self, source_id: str) -> Dict[str, Any]:
         return self._request("GET", f"/preview/{source_id}")
 
@@ -728,122 +530,6 @@ class BackendClient:
 
     def dataset_sample(self, source_id: str) -> Dict[str, Any]:
         return self._request("GET", f"/preview/{source_id}/sample")
-
-    def stream_clone(
-        self,
-        stream_id: str,
-        dest_dir: str = ".",
-        file_filter: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Clone a stream's files to local directory.
-
-        This downloads all files from the stream (from Globus or other storage)
-        to a local directory.
-
-        Args:
-            stream_id: The stream ID to clone
-            dest_dir: Destination directory
-            file_filter: Optional glob pattern to filter files (e.g., "*.csv")
-
-        Returns:
-            Dict with clone results
-        """
-        import fnmatch
-
-        files_result = self.stream_list_files(stream_id)
-        if not files_result.get("success"):
-            return {
-                "success": False,
-                "stream_id": stream_id,
-                "error": files_result.get("error", "Failed to list stream files"),
-            }
-
-        destination = Path(dest_dir).expanduser().resolve()
-        destination.mkdir(parents=True, exist_ok=True)
-
-        downloaded = []
-        errors = []
-
-        for file_info in files_result.get("files", []):
-            path = str(file_info.get("path") or "")
-            filename = str(file_info.get("filename") or Path(path).name)
-            if not path:
-                errors.append({"file": filename or "<unknown>", "error": "Missing file path"})
-                continue
-
-            if file_filter and not (
-                fnmatch.fnmatch(filename, file_filter) or fnmatch.fnmatch(path, file_filter)
-            ):
-                continue
-
-            download_url_result = self.stream_get_download_url(stream_id, path)
-            if not download_url_result.get("success"):
-                errors.append({
-                    "file": filename,
-                    "error": download_url_result.get("error", "Failed to get download URL"),
-                })
-                continue
-
-            download_url = str(download_url_result.get("download_url") or "")
-            if not download_url:
-                errors.append({"file": filename, "error": "No download URL returned"})
-                continue
-
-            try:
-                content = self._download_stream_file(download_url, file_info)
-            except Exception as exc:
-                errors.append({"file": filename, "error": str(exc)})
-                continue
-
-            target_path = self._safe_output_path(destination, filename)
-            if target_path is None:
-                errors.append({"file": filename, "error": "Unsafe destination filename"})
-                continue
-
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_bytes(content)
-            downloaded.append({
-                "filename": filename,
-                "path": str(target_path),
-                "size_bytes": len(content),
-            })
-
-        return {
-            "success": len(errors) == 0,
-            "stream_id": stream_id,
-            "destination": str(destination),
-            "downloaded": len(downloaded),
-            "files": downloaded,
-            "errors": errors if errors else None,
-        }
-
-    def _safe_output_path(self, destination: Path, filename: str) -> Optional[Path]:
-        normalized = (filename or "").replace("\\", "/").lstrip("/")
-        if not normalized:
-            return None
-        candidate = (destination / normalized).resolve()
-        try:
-            candidate.relative_to(destination)
-        except ValueError:
-            return None
-        return candidate
-
-    def _download_stream_file(self, download_url: str, file_info: Dict[str, Any]) -> bytes:
-        parsed = urlparse(download_url)
-        if parsed.scheme == "file":
-            return Path(unquote(parsed.path)).read_bytes()
-
-        headers: Optional[Dict[str, str]] = None
-        storage_backend = str(file_info.get("storage_backend") or "").lower()
-        host = (parsed.hostname or "").lower()
-        if storage_backend == "globus" or host.endswith("materialsdatafacility.org"):
-            token = self._globus_data_token or self._token
-            if token:
-                headers = {"Authorization": f"Bearer {token}"}
-
-        response = self._client.get(download_url, headers=headers)
-        response.raise_for_status()
-        return response.content
 
     _RETRY_STATUSES = {429, 502, 503, 504}
     _MAX_RETRIES = 3

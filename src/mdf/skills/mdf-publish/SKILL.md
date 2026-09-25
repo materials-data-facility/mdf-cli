@@ -48,7 +48,7 @@ If `mdf` is not found, tell the user to install it and stop:
 `pipx install mdf-cli` (preferred) or `pip install mdf-cli`.
 
 ```bash
-mdf status --auth --service staging
+mdf whoami --service staging
 ```
 
 If this reports "not authenticated", **tell the user to run `mdf login --service staging`
@@ -151,7 +151,7 @@ Do not run Stage 5 or Stage 6 in the same turn as presenting the draft.
 ## Stage 5 — Validate
 
 ```bash
-mdf validate --json --service staging
+mdf check --json --service staging
 ```
 
 This runs **client-side** manifest and preflight checks against `./mdf.yaml` (paths
@@ -223,7 +223,7 @@ mdf clone <source_id> --service staging     # download the data locally
 
 Then run Stages 1, 3, 4 over the cloned directory to draft *improved* metadata. Both
 human gates apply unchanged — and **Gate #2 guards both mutation paths below equally**:
-before running either `mdf edit` or `mdf publish --update --submit`, state exactly what
+before running either `mdf dataset edit` or `mdf publish --update --submit`, state exactly what
 will change on the record and wait for explicit confirmation in a new user message.
 Gate #1 approval of the draft is never approval to apply it.
 
@@ -231,7 +231,7 @@ Two ways to apply the improvements — pick based on what changed:
 
 1. **Title, description, or keywords only** — the direct edit command (Gate #2 first):
    ```bash
-   mdf edit <source_id> --title "..." --description "..." --keyword "..." --service staging
+   mdf dataset edit <source_id> --title "..." --description "..." --keyword "..." --service staging
    ```
    Note: the CLI exposes only these three fields today, even though the server accepts
    more.
@@ -273,6 +273,6 @@ curation. Say so before Gate #2.
 
 ## Roadmap (not in this version)
 
-MCP composition against `mdf.skill` (the in-process tool registry — a separate
-thing from this bundle), reuse of the autofeed importers, a `format=agent` card
-variant, and `mdf skill update` / `uninstall`.
+Reuse of the autofeed importers, a `format=agent` card variant, and skill
+update/uninstall commands. (For read-only agent access to MDF today, use the
+MCP server: `mdf mcp install`.)

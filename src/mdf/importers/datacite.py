@@ -9,7 +9,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from mdf.core.agent import _DOI_RE
-from mdf.importers.base import ExternalRecordNotFoundError, ExternalRepoAdapter
+from mdf.importers.base import ExternalImportError, ExternalRecordNotFoundError, ExternalRepoAdapter
 
 
 DATACITE_API = "https://api.datacite.org"
@@ -161,7 +161,8 @@ class DataCiteAdapter(ExternalRepoAdapter):
                     f"DOI {doi} is not registered with DataCite. If it identifies a "
                     "Crossref publication, add it to related_works instead."
                 )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                raise ExternalImportError(f"DataCite answered HTTP {response.status_code} for DOI {doi}")
             payload = response.json().get("data") or {}
 
         attributes = payload.get("attributes") or {}

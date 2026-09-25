@@ -93,7 +93,7 @@ class NeverCalledClient:
 def _patch_list_client(monkeypatch, pages: List[Any]) -> RecordingClient:
     client = RecordingClient(pages)
     monkeypatch.setattr(
-        "mdf.cli.main.BackendClient.authenticated", lambda **kwargs: client
+        "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: client
     )
     return client
 
@@ -267,7 +267,7 @@ class TestAdminConfirmationUnderJson:
     ):
         client = NeverCalledClient()
         monkeypatch.setattr(
-            "mdf.cli.admin_cmd.BackendClient.authenticated", lambda **kwargs: client
+            "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: client
         )
 
         def refuse(*args, **kwargs):  # pragma: no cover - must not be called
@@ -304,7 +304,7 @@ class TestAdminConfirmationUnderJson:
                 return call
 
         monkeypatch.setattr(
-            "mdf.cli.admin_cmd.BackendClient.authenticated", lambda **kwargs: Client()
+            "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: Client()
         )
         monkeypatch.setattr(
             "mdf.cli.preflight.resolve_dataset_identifier", lambda raw_id, client: raw_id
@@ -329,15 +329,15 @@ class TestAdminConfirmationUnderJson:
 class TestHumanModeFailuresExitNonZero:
     def test_dataset_versions(self, monkeypatch):
         monkeypatch.setattr(
-            "mdf.cli.dataset_cmd.read_client", lambda **kwargs: _canned(NOT_FOUND)
+            "mdf.cli.formatting.read_client", lambda **kwargs: _canned(NOT_FOUND)
         )
-        result = runner.invoke(app, ["dataset", "versions", "does-not-exist-xyz"])
+        result = runner.invoke(app, ["versions", "does-not-exist-xyz"])
         assert result.exit_code == EXIT_NOT_FOUND
         assert "Versions failed" in result.stdout
 
     def test_status(self, monkeypatch):
         monkeypatch.setattr(
-            "mdf.cli.main.BackendClient.authenticated",
+            "mdf.core.backend_client.BackendClient.authenticated",
             lambda **kwargs: _canned(NOT_FOUND),
         )
         result = runner.invoke(app, ["status", "does-not-exist-xyz"])
@@ -346,7 +346,7 @@ class TestHumanModeFailuresExitNonZero:
 
     def test_related(self, monkeypatch):
         monkeypatch.setattr(
-            "mdf.cli.main.read_client", lambda **kwargs: _canned(SERVER_ERROR)
+            "mdf.cli.formatting.read_client", lambda **kwargs: _canned(SERVER_ERROR)
         )
         result = runner.invoke(app, ["related", "src-1"])
         assert result.exit_code == EXIT_NETWORK
@@ -377,7 +377,7 @@ def _canned(result: Any):
 
 def _stub_preflight(monkeypatch):
     monkeypatch.setattr(
-        "mdf.cli.main.run_preflight",
+        "mdf.cli.commands.publish.run_preflight",
         lambda *args, **kwargs: {
             "success": True,
             "issues": [],
@@ -398,7 +398,7 @@ class TestExceptionBoundaryUnderJson:
         def boom(self, **kwargs):
             raise RuntimeError("upload aborted at 40%")
 
-        monkeypatch.setattr("mdf.cli.main.MDFAgent.publish", boom)
+        monkeypatch.setattr("mdf.core.agent.MDFAgent.publish", boom)
 
         result = runner.invoke(
             app,
@@ -426,7 +426,7 @@ class TestExceptionBoundaryUnderJson:
         def boom(self, **kwargs):
             raise RuntimeError("cannot build payload: bad license")
 
-        monkeypatch.setattr("mdf.cli.main.MDFAgent.build_submission", boom)
+        monkeypatch.setattr("mdf.core.agent.MDFAgent.build_submission", boom)
 
         result = runner.invoke(
             app,
@@ -449,7 +449,7 @@ class TestExceptionBoundaryUnderJson:
     def test_clone_failure(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
         monkeypatch.setattr(
-            "mdf.cli.main.MDFAgent.plan_clone",
+            "mdf.core.agent.MDFAgent.plan_clone",
             lambda self, **kwargs: {
                 "success": True,
                 "resolved_source_id": "src-1",
@@ -463,7 +463,7 @@ class TestExceptionBoundaryUnderJson:
         def boom(self, **kwargs):
             raise RuntimeError("endpoint ep-3 unavailable")
 
-        monkeypatch.setattr("mdf.cli.main.MDFAgent.clone", boom)
+        monkeypatch.setattr("mdf.core.agent.MDFAgent.clone", boom)
 
         result = runner.invoke(app, ["clone", "src-1", str(tmp_path / "out"), "--json"])
         assert result.exit_code == EXIT_NETWORK
@@ -499,12 +499,15 @@ class TestExceptionBoundaryUnderJson:
 # ---------------------------------------------------------------------------
 
 
-class TestValidateHumanExitCode:
+class TestCheckHumanExitCode:
     def test_blocking_issues_exit_usage(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
-        result = runner.invoke(app, ["validate", "./does-not-exist.csv"])
+        monkeypatch.setattr(
+            "mdf.core.backend_client.BackendClient.health", lambda self: {"status": "ok"}
+        )
+        result = runner.invoke(app, ["check", "./does-not-exist.csv", "-t", "T", "-a", "A"])
         assert result.exit_code == EXIT_USAGE
-        assert "Validation failed" in result.stdout
+        assert "does not exist" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -523,10 +526,10 @@ class TestSearchBriefWithNullResults:
                     {"query": "x", "total": 0, "results": None}, status_code=200
                 )
 
-        monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: Client())
+        monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: Client())
         result = runner.invoke(app, ["search", "x", "--json", "--brief"])
         assert result.exit_code == EXIT_OK
-        assert envelope_of(result) == []
+        assert envelope_of(result)["results"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -534,9 +537,9 @@ class TestSearchBriefWithNullResults:
 # ---------------------------------------------------------------------------
 
 
-class TestTopLevelResubmitAlias:
+class TestResubmitYes:
     def test_help_documents_the_flag(self):
-        result = runner.invoke(app, ["resubmit", "--help"])
+        result = runner.invoke(app, ["dataset", "resubmit", "--help"])
         assert result.exit_code == EXIT_OK
         assert "--yes" in result.stdout
 
@@ -555,7 +558,7 @@ class TestTopLevelResubmitAlias:
                 return call
 
         monkeypatch.setattr(
-            "mdf.cli.dataset_cmd.BackendClient.authenticated", lambda **kwargs: Client()
+            "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: Client()
         )
         monkeypatch.setattr("mdf.cli.dataset_cmd._interactive_stdin", lambda: True)
 
@@ -564,7 +567,7 @@ class TestTopLevelResubmitAlias:
 
         monkeypatch.setattr("typer.confirm", refuse)
 
-        result = runner.invoke(app, ["resubmit", "src-1", "--yes"])
+        result = runner.invoke(app, ["dataset", "resubmit", "src-1", "--yes"])
         assert result.exit_code == EXIT_OK
         assert "resubmit" in seen
 

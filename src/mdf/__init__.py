@@ -1,4 +1,4 @@
-"""MDF Agent package."""
+"""MDF CLI package."""
 
 from mdf.version import __version__
 from mdf.core.agent import MDFAgent

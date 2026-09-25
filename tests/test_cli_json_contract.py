@@ -85,13 +85,14 @@ class FakeClient:
 
 def patch_read(monkeypatch, result, module: str = "mdf.cli.main") -> FakeClient:
     client = FakeClient(result)
-    monkeypatch.setattr(f"{module}.read_client", lambda **kwargs: client)
+    # Every command gets its public client from one place (options.open_client).
+    monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: client)
     return client
 
 
 def patch_auth(monkeypatch, result, module: str = "mdf.cli.main") -> FakeClient:
     client = FakeClient(result)
-    monkeypatch.setattr(f"{module}.BackendClient.authenticated", lambda **kwargs: client)
+    monkeypatch.setattr("mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: client)
     return client
 
 
@@ -191,7 +192,7 @@ class TestJsonFailurePathsExitNonZero:
     def test_status_auth_failure(self, monkeypatch):
         patch_auth(monkeypatch, UNAUTHORIZED)
         monkeypatch.setattr(
-            "mdf.cli.main._resolve_identifier_with_notice",
+            "mdf.cli.commands.status._resolve_identifier_with_notice",
             lambda client, raw, **kwargs: raw,
         )
         result = runner.invoke(app, ["status", "src-1", "--json"])
@@ -216,28 +217,29 @@ class TestJsonFailurePathsExitNonZero:
         assert result.exit_code == EXIT_NOT_FOUND
         assert_error_envelope(envelope_of(result), "not_found")
 
-    def test_dataset_preview_not_found(self, monkeypatch):
-        patch_read(monkeypatch, NOT_FOUND, module="mdf.cli.dataset_cmd")
-        result = runner.invoke(app, ["dataset", "preview", "does-not-exist-xyz", "--json"])
+    def test_show_files_not_found(self, monkeypatch):
+        patch_read(monkeypatch, NOT_FOUND)
+        result = runner.invoke(app, ["show", "does-not-exist-xyz", "--files", "--json"])
         assert result.exit_code == EXIT_NOT_FOUND
         assert_error_envelope(envelope_of(result), "not_found")
 
-    def test_dataset_preview_missing_profile_stays_an_empty_state(self, monkeypatch):
+    def test_show_files_missing_profile_stays_an_empty_state(self, monkeypatch):
         # A migrated record with no generated profile is expected, not a failure.
-        patch_read(
-            monkeypatch,
-            ApiResult({"detail": "No profile found"}, status_code=404),
-            module="mdf.cli.dataset_cmd",
-        )
-        result = runner.invoke(app, ["dataset", "preview", "migrated_v1", "--json"])
+        class Client(FakeClient):
+            def dataset_preview(self, source_id):
+                return ApiResult({"detail": "No profile found"}, status_code=404)
+
+        client = Client(ApiResult({"success": True, "card": {"source_id": "migrated_v1"}}, status_code=200))
+        monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: client)
+        result = runner.invoke(app, ["show", "migrated_v1", "--files", "--json"])
         assert result.exit_code == EXIT_OK
         payload = envelope_of(result)
         assert payload["success"] is True
-        assert payload["detail"] == "No profile found"
+        assert payload["files"] is None
 
-    def test_dataset_versions_not_found(self, monkeypatch):
-        patch_read(monkeypatch, NOT_FOUND, module="mdf.cli.dataset_cmd")
-        result = runner.invoke(app, ["dataset", "versions", "does-not-exist-xyz", "--json"])
+    def test_versions_not_found(self, monkeypatch):
+        patch_read(monkeypatch, NOT_FOUND)
+        result = runner.invoke(app, ["versions", "does-not-exist-xyz", "--json"])
         assert result.exit_code == EXIT_NOT_FOUND
         assert_error_envelope(envelope_of(result), "not_found")
 
@@ -267,7 +269,7 @@ class TestJsonStdoutStaysPlain:
     def test_a_doi_resolution_notice_goes_to_stderr(self, monkeypatch):
         """The "Resolved DOI to source ID" chrome must not break `| jq`."""
         client = FakeClient(ApiResult({"card": {"source_id": "src-resolved"}}, status_code=200))
-        monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: client)
+        monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: client)
         monkeypatch.setattr(
             "mdf.cli.formatting.resolve_dataset_identifier",
             lambda raw_id, client: "src-resolved",
@@ -309,53 +311,52 @@ class TestWhoamiDerivesSuccess:
         assert payload["success"] is True
         assert payload["status"] == "authenticated"
 
-    def test_status_auth_flag_agrees_with_whoami(self, monkeypatch):
-        monkeypatch.setattr("mdf.auth.globus.is_logged_in", lambda **kwargs: False)
-        monkeypatch.delenv("MDF_CONNECT_TOKEN", raising=False)
-        monkeypatch.delenv("MDF_CLIENT_ID", raising=False)
-        result = runner.invoke(app, ["status", "--auth", "--json", "--service", "staging"])
-        assert result.exit_code == EXIT_AUTH
-        assert envelope_of(result)["success"] is False
+    def test_status_no_longer_takes_auth(self):
+        """`status --auth` became `whoami` (clean break, C8)."""
+        result = runner.invoke(app, ["status", "--auth", "--json"])
+        assert result.exit_code == EXIT_USAGE
+        assert envelope_of(result)["error"]["kind"] == "validation"
 
 
 # ---------------------------------------------------------------------------
-# F-8 — validate --json
+# F-8 — check --json (was validate --json)
 # ---------------------------------------------------------------------------
 
 
-class TestValidateJson:
+class TestCheckJson:
+    """`mdf check` (was `validate` / `publish --preflight-only`)."""
+
     def test_empty_case_is_json_not_rich_chrome(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        result = runner.invoke(app, ["validate", "--json"])
+        result = runner.invoke(app, ["check", "--json"])
         assert result.exit_code == EXIT_USAGE
         payload = envelope_of(result)
         assert_error_envelope(payload, "validation")
-        assert "No mdf.yaml found" in payload["error"]["message"]
-        # The old shape's keys are still there for existing callers.
-        assert payload["errors"] and payload["warnings"] == []
+        assert "no mdf.yaml found" in payload["error"]["message"]
 
     def test_blocking_issues_exit_non_zero_with_the_report(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "d.csv").write_text("a,b\n1,2\n")
-        result = runner.invoke(app, ["validate", "d.csv", "--json"])
+        monkeypatch.setattr(
+            "mdf.cli.commands.publish.run_preflight",
+            lambda *args, **kwargs: {"success": False, "issues": [{"severity": "blocking", "message": "x"}]},
+        )
+        result = runner.invoke(app, ["check", "d.csv", "-t", "T", "-a", "A", "--json"])
         assert result.exit_code == EXIT_USAGE
         payload = envelope_of(result)
         assert payload["success"] is False
-        assert payload["errors"]
-        assert "preflight" in payload
+        assert payload["preflight"]["issues"]
 
-    def test_passing_validation_is_success_true(self, tmp_path, monkeypatch):
+    def test_passing_check_is_success_true(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "d.csv").write_text("a,b\n1,2\n")
         monkeypatch.setattr(
-            "mdf.cli.main.run_preflight",
+            "mdf.cli.commands.publish.run_preflight",
             lambda *args, **kwargs: {"success": True, "issues": []},
         )
-        result = runner.invoke(app, ["validate", "d.csv", "--json"])
+        result = runner.invoke(app, ["check", "d.csv", "-t", "T", "-a", "A", "--json"])
         assert result.exit_code == EXIT_OK
-        payload = envelope_of(result)
-        assert payload["success"] is True
-        assert payload["errors"] == []
+        assert envelope_of(result)["success"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -376,10 +377,10 @@ class TestListPagesServerSide:
                 return {"success": True, "submissions": [], "next_key": None}
 
         monkeypatch.setattr(
-            "mdf.cli.main.BackendClient.authenticated", lambda **kwargs: PagingClient()
+            "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: PagingClient()
         )
         result = runner.invoke(
-            app, ["list", "--json", "--status", "published", "--limit", "7"]
+            app, ["list", "--json", "--all", "--status", "published", "--limit", "7"]
         )
         assert result.exit_code == EXIT_OK
         assert seen[0]["status"] == "published"
@@ -415,7 +416,7 @@ class TestListPagesServerSide:
                 return pages[len(seen) - 1]
 
         monkeypatch.setattr(
-            "mdf.cli.main.BackendClient.authenticated", lambda **kwargs: PagingClient()
+            "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: PagingClient()
         )
         result = runner.invoke(app, ["list", "--json", "--limit", "3"])
         assert result.exit_code == EXIT_OK
@@ -444,7 +445,7 @@ class TestListPagesServerSide:
                 }
 
         monkeypatch.setattr(
-            "mdf.cli.main.BackendClient.authenticated", lambda **kwargs: PagingClient()
+            "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: PagingClient()
         )
         result = runner.invoke(app, ["list", "--json", "--limit", "2"])
         assert result.exit_code == EXIT_OK
@@ -472,7 +473,7 @@ class TestListPagesServerSide:
                 }
 
         monkeypatch.setattr(
-            "mdf.cli.main.BackendClient.authenticated", lambda **kwargs: SloppyClient()
+            "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: SloppyClient()
         )
         result = runner.invoke(app, ["list", "--json", "--status", "published"])
         payload = envelope_of(result)
@@ -495,7 +496,7 @@ class TestListPagesServerSide:
                 }
 
         monkeypatch.setattr(
-            "mdf.cli.main.BackendClient.authenticated", lambda **kwargs: MultiClient()
+            "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: MultiClient()
         )
         result = runner.invoke(app, ["list", "--json", "--status", "published,rejected"])
         payload = envelope_of(result)
@@ -641,7 +642,7 @@ class TestSearchCommandFlags:
         client = FakeClient(
             ApiResult({"query": "band gap", "total": 0, "results": []}, status_code=200)
         )
-        monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: client)
+        monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: client)
         result = runner.invoke(
             app,
             [
@@ -677,7 +678,7 @@ class TestSearchCommandFlags:
                 status_code=200,
             )
         )
-        monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: client)
+        monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: client)
         result = runner.invoke(app, ["search", "--json", "--limit", "1"])
         assert result.exit_code == EXIT_OK
         assert [c for c in client.calls if c[0] == "search"][0][1] == (None,)
@@ -717,7 +718,7 @@ class TestSearchCommandFlags:
                 status_code=200,
             )
         )
-        monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: client)
+        monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: client)
         result = runner.invoke(app, ["search", "band gap"])
         assert result.exit_code == EXIT_OK
         assert "Facets" in result.stdout
@@ -726,7 +727,7 @@ class TestSearchCommandFlags:
         assert "2021" in result.stdout
         assert "--organization" in result.stdout
 
-    def test_brief_json_stays_a_bare_list(self, monkeypatch):
+    def test_brief_json_is_an_envelope_with_ids(self, monkeypatch):
         client = FakeClient(
             ApiResult(
                 {
@@ -737,11 +738,14 @@ class TestSearchCommandFlags:
                 status_code=200,
             )
         )
-        monkeypatch.setattr("mdf.cli.main.read_client", lambda **kwargs: client)
+        monkeypatch.setattr("mdf.cli.formatting.read_client", lambda **kwargs: client)
         result = runner.invoke(app, ["search", "x", "--json", "--brief"])
         assert result.exit_code == EXIT_OK
         payload = json.loads(result.stdout)
-        assert payload == [{"title": "T", "authors": ["A"], "doi": "10.1/x"}]
+        assert payload["success"] is True
+        assert payload["results"] == [
+            {"source_id": None, "version": None, "title": "T", "authors": ["A"], "doi": "10.1/x"}
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -805,7 +809,7 @@ class TestResubmitConfirmation:
     def test_yes_flag_exists_and_skips_the_prompt(self, monkeypatch):
         client = FakeClient(ApiResult({"success": True}, status_code=200))
         monkeypatch.setattr(
-            "mdf.cli.dataset_cmd.BackendClient.authenticated", lambda **kwargs: client
+            "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: client
         )
 
         def refuse(*args, **kwargs):  # pragma: no cover - must not be called
@@ -819,7 +823,7 @@ class TestResubmitConfirmation:
     def test_declining_the_prompt_aborts(self, monkeypatch):
         client = FakeClient(ApiResult({"success": True}, status_code=200))
         monkeypatch.setattr(
-            "mdf.cli.dataset_cmd.BackendClient.authenticated", lambda **kwargs: client
+            "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: client
         )
         monkeypatch.setattr("mdf.cli.dataset_cmd._interactive_stdin", lambda: True)
         monkeypatch.setattr("typer.confirm", lambda *a, **k: False)
@@ -830,7 +834,7 @@ class TestResubmitConfirmation:
     def test_json_without_yes_is_a_usage_error_not_a_silent_prompt(self, monkeypatch):
         client = FakeClient(ApiResult({"success": True}, status_code=200))
         monkeypatch.setattr(
-            "mdf.cli.dataset_cmd.BackendClient.authenticated", lambda **kwargs: client
+            "mdf.core.backend_client.BackendClient.authenticated", lambda **kwargs: client
         )
         result = runner.invoke(app, ["dataset", "resubmit", "src-1", "--json"])
         assert result.exit_code == EXIT_USAGE
