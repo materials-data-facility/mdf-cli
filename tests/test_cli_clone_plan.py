@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from typer.testing import CliRunner
@@ -185,7 +186,10 @@ def test_failed_or_slow_listing_is_an_error(monkeypatch, failure):
         def operation_ls(self, endpoint_id, path=None):
             if failure == "error":
                 raise RuntimeError("boom")
-            return [{"type": "dir", "name": "sub"}]  # endless tree: only the deadline stops it
+            # Endless tree: only the deadline stops it. Each listing takes time, like a
+            # real Transfer call, so the deadline trips long before the recursion limit.
+            time.sleep(0.005)
+            return [{"type": "dir", "name": "sub"}]
 
     monkeypatch.setattr(globus_sdk, "TransferClient", FakeTC)
     with pytest.raises(agent_module.CloneListingError):
