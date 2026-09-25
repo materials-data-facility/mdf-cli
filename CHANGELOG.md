@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-09-25
 
 ### Breaking
 - **One command tree, no aliases (clean break).** Nothing of the pre-0.3 surface was on PyPI, so
