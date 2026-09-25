@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from typing import Any, Dict, List, Optional, Sequence
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -78,6 +78,83 @@ def _api_url_for_service(service_instance: Optional[str] = None) -> str:
     return url
 
 
+#: Hosts that are always loopback: a local dev backend may receive a cached login.
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+#: Env var that lets a cached Globus login be sent to an --api-url / MDF_API_URL
+#: host outside the known service map.
+TRUST_API_URL_ENV = "MDF_TRUST_API_URL"
+_TRUTHY = {"1", "true", "yes", "on", "y"}
+
+
+def is_trusted_api_url(url: str) -> bool:
+    """True when ``url`` may receive the user's cached Globus login tokens.
+
+    That is one of the known MDF services (same scheme, host and port as the
+    service map) or a loopback host (local development), or any URL when
+    ``MDF_TRUST_API_URL`` is set. A cached login carries the data, transfer and
+    groups tokens, so it must never follow an arbitrary ``--api-url``.
+    """
+    if (os.environ.get(TRUST_API_URL_ENV) or "").strip().lower() in _TRUTHY:
+        return True
+    parsed = urlparse(str(url or ""))
+    host = (parsed.hostname or "").lower()
+    if host in _LOOPBACK_HOSTS:
+        return True
+    origin = (parsed.scheme.lower(), host, parsed.port)
+    for known in _V2_API_URLS.values():
+        k = urlparse(known)
+        if (k.scheme, (k.hostname or "").lower(), k.port) == origin:
+            return True
+    return False
+
+
+#: credential_source() value -> how `mdf whoami` describes it.
+CREDENTIAL_LABELS = {
+    "token": "explicit token (--token)",
+    "env_token": "environment token (MDF_CONNECT_TOKEN)",
+    "client_credentials": "confidential client (MDF_CLIENT_ID)",
+    "dev_user": "dev user (X-User-Id)",
+    "local": "local dev backend (no auth)",
+    "cached_login": "cached Globus login",
+    "saved_token": "saved token (mdf login --token --save)",
+}
+
+
+def credential_source(
+    url: str,
+    *,
+    token: Optional[str] = None,
+    service_instance: Optional[str] = None,
+    dev_user_id: Optional[str] = None,
+) -> Optional[str]:
+    """Which credential ``BackendClient.authenticated`` would use for ``url`` (no network).
+
+    The single definition of the resolution order, so what `mdf whoami`
+    reports is what requests actually carry. ``None`` means no credential: an
+    interactive login would be needed (or is refused, for an untrusted URL).
+    """
+    resolved_service = core_config.resolve_service(service_instance).strip().lower()
+    if token:
+        return "token"
+    if os.environ.get("MDF_CONNECT_TOKEN"):
+        return "env_token"
+    if os.environ.get("MDF_CLIENT_ID") and os.environ.get("MDF_CLIENT_SECRET"):
+        return "client_credentials"
+    if dev_user_id or os.environ.get("MDF_DEV_USER_ID") or (
+        resolved_service == "local" and os.environ.get("LOCAL_USER_ID")
+    ):
+        return "dev_user"
+    if resolved_service == "local":
+        return "local"
+    from mdf.auth.globus import is_logged_in
+
+    if is_trusted_api_url(url) and is_logged_in(service_instance=resolved_service):
+        return "cached_login"
+    if core_config.load_saved_token(url):
+        return "saved_token"
+    return None
+
+
 class BackendClient:
     def __init__(
         self,
@@ -121,9 +198,15 @@ class BackendClient:
         2. MDF_CONNECT_TOKEN env var
         3. MDF_CLIENT_ID + MDF_CLIENT_SECRET env vars (confidential client flow)
         4. dev_user_id / MDF_DEV_USER_ID env var (X-User-Id)
-        5. A usable cached Globus login
+        5. A usable cached Globus login — only for a trusted API URL
+           (:func:`is_trusted_api_url`)
         6. A token saved by ``mdf login --token T --save`` for this same API URL
-        7. An interactive Globus OAuth2 login
+        7. An interactive Globus OAuth2 login — also only for a trusted URL
+
+        Steps 1-6 follow :func:`credential_source`. For an untrusted
+        ``--api-url``/``MDF_API_URL`` host with no explicit credential this
+        raises :class:`mdf.core.exceptions.AuthRequired` rather than send the
+        user's Globus tokens there.
 
         ``interactive`` controls step 7 when no cached login exists: ``True``
         prompts (on stderr), ``False`` raises
@@ -185,15 +268,22 @@ class BackendClient:
             # Local dev backends commonly run in AUTH_MODE=dev and can derive a default user.
             return cls(base_url=url)
 
-        # A saved token is only for the exact API URL it was validated against,
-        # and a usable cached Globus login (which also carries the data,
-        # transfer and groups tokens) takes precedence over it.
-        saved_token = core_config.load_saved_token(url)
-        if saved_token:
-            from mdf.auth.globus import is_logged_in
+        # A saved token is only for the exact API URL it was validated against;
+        # a usable cached Globus login (which also carries the data, transfer
+        # and groups tokens) takes precedence over it on trusted URLs.
+        source = credential_source(url, service_instance=resolved_service)
+        if source == "saved_token":
+            return cls(base_url=url, token=core_config.load_saved_token(url))
+        if not is_trusted_api_url(url):
+            from mdf.core.exceptions import AuthRequired
 
-            if not is_logged_in(service_instance=resolved_service):
-                return cls(base_url=url, token=saved_token)
+            raise AuthRequired(
+                f"Not sending your Globus login to {url}: it is not a known MDF service",
+                hint=(
+                    f"pass --token for this API, save one with `mdf login --token T --save --api-url {url}`, "
+                    f"or set {TRUST_API_URL_ENV}=1 if you trust this host"
+                ),
+            )
 
         # Lazy import so token/dev-user workflows do not require globus_sdk.
         from mdf.auth.globus import get_authorizer_for_scopes, get_scopes_for_service, DATA_MDF_SCOPE, TRANSFER_SCOPE, GROUPS_SCOPE, NCSA_MDF_COLLECTION_UUID

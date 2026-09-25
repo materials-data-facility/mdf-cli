@@ -1,5 +1,7 @@
 """Custom exceptions for MDF CLI."""
 
+from __future__ import annotations
+
 
 class MDFError(Exception):
     """Base exception for MDF CLI errors."""
@@ -26,5 +28,7 @@ class AuthRequired(MDFError):
     ``MDF_CONNECT_TOKEN`` / ``MDF_CLIENT_ID`` + ``MDF_CLIENT_SECRET``.
     """
 
-    def __init__(self, message: str = "Authentication required"):
+    def __init__(self, message: str = "Authentication required", *, hint: str | None = None):
         super().__init__(message)
+        #: Recovery advice more specific than "run `mdf login`", when there is one.
+        self.hint = hint

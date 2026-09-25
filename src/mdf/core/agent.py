@@ -534,7 +534,7 @@ def _is_mdf_https_url(url: str) -> bool:
     the MDF HTTPS base (``_MDF_HTTPS_BASE``). A dataset's ``data_sources`` are
     publisher-controlled, so attaching the token to an arbitrary host would let
     any publisher harvest cloners' tokens. Anything else — a different host, a
-    plain ``http://`` URL, a malformed URL — gets no credentials.
+    plain ``http://`` URL, a non-default port, a malformed URL — gets no credentials.
     """
     if not url:
         return False
@@ -543,6 +543,12 @@ def _is_mdf_https_url(url: str) -> bool:
     except Exception:
         return False
     if parsed.scheme != "https":
+        return False
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    if port not in (None, 443):  # same host on another port is another service
         return False
     base_host = (urlparse(_MDF_HTTPS_BASE).hostname or "").lower()
     return (parsed.hostname or "").lower() == base_host

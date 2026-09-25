@@ -203,7 +203,7 @@ def test_interactive_login_requests_groups_and_sends_the_header(monkeypatch):
     monkeypatch.setattr(globus_auth, "GlobusAppConfig", lambda **kwargs: SimpleNamespace())
 
     client = BackendClient.authenticated(
-        base_url="https://example.org", service_instance="staging"
+        service_instance="staging"
     )
 
     requested = _FakeUserApp.instances[-1].scope_reqs
@@ -251,7 +251,7 @@ def test_authenticated_non_interactive_raises_auth_required(monkeypatch, capsys)
     _no_cached_login(monkeypatch)
     with pytest.raises(AuthRequired):
         BackendClient.authenticated(
-            base_url="https://example.org", service_instance="staging", interactive=False
+            service_instance="staging", interactive=False
         )
     captured = capsys.readouterr()
     assert _LoginNeededUserApp.login_calls == 0
@@ -267,14 +267,14 @@ def test_interactive_login_scope_narrows_the_default(monkeypatch):
     _no_cached_login(monkeypatch)
     with interactive_login(False):
         with pytest.raises(AuthRequired):
-            BackendClient.authenticated(base_url="https://example.org", service_instance="staging")
+            BackendClient.authenticated(service_instance="staging")
     assert _LoginNeededUserApp.login_calls == 0
 
 
 def test_sdk_default_still_prompts_on_stderr(monkeypatch, capsys):
     """Foundry relies on the SDK prompting by default; the prompt must not touch stdout."""
     _no_cached_login(monkeypatch)
-    BackendClient.authenticated(base_url="https://example.org", service_instance="staging")
+    BackendClient.authenticated(service_instance="staging")
     captured = capsys.readouterr()
     assert _LoginNeededUserApp.login_calls == 1
     assert captured.out == ""
@@ -364,3 +364,108 @@ def test_data_token_only_goes_to_the_exact_mdf_host():
     # The stream download path that sent the API token to any *materialsdatafacility.org
     # host is gone with the stream client (CLI-D4).
     assert not [name for name in dir(BackendClient) if "stream" in name]
+
+
+# ---------------------------------------------------------------------------
+# Credential re-review (07f3eca): cached logins only go to trusted API hosts
+# ---------------------------------------------------------------------------
+
+
+def _cached_login(monkeypatch, tmp_path):
+    from mdf.auth import globus as globus_auth
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name in ("MDF_CONNECT_TOKEN", "MDF_DEV_USER_ID", "MDF_CLIENT_ID", "MDF_CLIENT_SECRET",
+                 "MDF_API_URL", "MDF_TRUST_API_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(globus_auth, "is_logged_in", lambda **kwargs: True)
+    monkeypatch.setattr(globus_auth, "UserApp", _FakeUserApp)
+    monkeypatch.setattr(globus_auth, "JSONTokenStorage", lambda path: SimpleNamespace())
+    monkeypatch.setattr(globus_auth, "GlobusAppConfig", lambda **kwargs: SimpleNamespace())
+
+
+def test_cached_login_is_not_sent_to_an_untrusted_api_url(monkeypatch, tmp_path):
+    import pytest
+
+    from mdf.core.exceptions import AuthRequired
+
+    _cached_login(monkeypatch, tmp_path)
+    for url in ("https://attacker.example", "https://3xicgt0g7l.execute-api.us-east-1.amazonaws.com:8443/staging"):
+        with pytest.raises(AuthRequired) as excinfo:
+            BackendClient.authenticated(base_url=url, service_instance="staging")
+        assert "MDF_TRUST_API_URL" in excinfo.value.hint
+    monkeypatch.setenv("MDF_API_URL", "https://attacker.example")
+    with pytest.raises(AuthRequired):
+        BackendClient.authenticated(service_instance="staging")
+
+
+def test_cached_login_goes_to_known_services_loopback_or_an_opted_in_host(monkeypatch, tmp_path):
+    _cached_login(monkeypatch, tmp_path)
+    for url in (
+        STAGING_URL,
+        STAGING_URL + "/",
+        "http://localhost:8080",
+        "http://127.0.0.1:9000",
+        "http://[::1]:8080",
+    ):
+        client = BackendClient.authenticated(base_url=url, service_instance="staging")
+        assert client._globus_data_token == f"tok-{NCSA_MDF_COLLECTION_UUID}", url
+    monkeypatch.setenv("MDF_TRUST_API_URL", "1")
+    assert BackendClient.authenticated(base_url="https://mine.example", service_instance="staging")._token
+    # An explicit token is always the caller's choice, and carries nothing else.
+    monkeypatch.delenv("MDF_TRUST_API_URL")
+    client = BackendClient.authenticated(base_url="https://mine.example", token="t", service_instance="staging")
+    assert client._token == "t" and client._globus_data_token is None
+
+
+def test_credential_source_matches_the_real_resolution_order(monkeypatch, tmp_path):
+    from mdf.core.backend_client import credential_source
+
+    _cached_login(monkeypatch, tmp_path)
+    from mdf.core import config as core_config
+
+    core_config.save_token("saved", STAGING_URL)
+    assert credential_source(STAGING_URL, service_instance="staging") == "cached_login"
+    assert credential_source(STAGING_URL, service_instance="staging", dev_user_id="u") == "dev_user"
+    monkeypatch.setattr("mdf.auth.globus.is_logged_in", lambda **kwargs: False)
+    assert credential_source(STAGING_URL, service_instance="staging") == "saved_token"
+    monkeypatch.setenv("MDF_CONNECT_TOKEN", "env")
+    assert credential_source(STAGING_URL, service_instance="staging") == "env_token"
+
+
+def test_saved_token_keys_normalize_scheme_host_port_and_slash_but_not_path(monkeypatch, tmp_path):
+    from mdf.core import config as core_config
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    core_config.save_token("t1", "https://API.Example.org:443/Staging/")
+    assert core_config.load_saved_token("https://api.example.org/Staging") == "t1"
+    assert core_config.load_saved_token("https://api.example.org/staging") is None
+    assert core_config.load_saved_token("https://api.example.org:8443/Staging") is None
+    core_config.save_token("t2", "http://localhost:80")
+    assert core_config.load_saved_token("http://LOCALHOST") == "t2"
+
+
+def test_symlinked_token_file_is_never_read_and_logout_removes_the_link(monkeypatch, tmp_path):
+    import json
+    import os
+
+    from mdf.core import config as core_config
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    target = tmp_path / "elsewhere.json"
+    target.write_text(json.dumps({"https://api.example.org": "planted"}))
+    path = core_config.saved_token_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(target, path)
+    assert core_config.load_saved_token("https://api.example.org") is None
+    assert core_config.clear_saved_token() is True
+    assert not path.exists() and not path.is_symlink()
+    assert target.exists()  # the link's target is untouched
+
+
+def test_data_token_host_check_requires_the_default_port():
+    from mdf.core.agent import _is_mdf_https_url
+
+    assert _is_mdf_https_url("https://data.materialsdatafacility.org:443/a.csv")
+    assert not _is_mdf_https_url("https://data.materialsdatafacility.org:8443/a.csv")
+    assert not _is_mdf_https_url("https://data.materialsdatafacility.org:notaport/a.csv")

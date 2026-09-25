@@ -497,6 +497,26 @@ class TestAuthCommands:
         assert payload["error"]["message"] == "Credentials rejected"
         assert payload["status"] == "credentials rejected"
 
+    def test_untrusted_api_url_gets_no_cached_login(self, monkeypatch, tmp_path):
+        """Credential re-review #1 and #5: the CLI never sends a cached login to --api-url X."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for name in ("MDF_CONNECT_TOKEN", "MDF_CLIENT_ID", "MDF_DEV_USER_ID", "MDF_TRUST_API_URL"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr("mdf.auth.globus.is_logged_in", lambda **kwargs: True)
+
+        def no_request(*args, **kwargs):  # pragma: no cover - must not be called
+            raise AssertionError("no request may reach the untrusted host")
+
+        monkeypatch.setattr("httpx.Client.request", no_request)
+        who = runner.invoke(app, ["whoami", "--json", "--api-url", "https://attacker.example"])
+        assert who.exit_code == 4
+        listing = runner.invoke(app, ["list", "--json", "--api-url", "https://attacker.example"])
+        assert listing.exit_code == 4
+        assert "MDF_TRUST_API_URL" in json.loads(listing.stdout)["error"]["hint"]
+        # On the real service the same cached login is what whoami reports.
+        known = json.loads(runner.invoke(app, ["whoami", "--json", "--service", "staging"]).stdout)
+        assert known["method"] == "cached Globus login"
+
     def test_whoami_reports_identity(self, monkeypatch):
         monkeypatch.setenv("MDF_CONNECT_TOKEN", "env-token")
         monkeypatch.setattr(

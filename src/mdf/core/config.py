@@ -155,13 +155,37 @@ def saved_token_path() -> Path:
     return _default_config_path().parent / "access_tokens.json"
 
 
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
 def _token_key(base_url: str) -> str:
-    return str(base_url or "").strip().rstrip("/").lower()
+    """Normalize an API URL for keying saved tokens.
+
+    Scheme and host are case-insensitive, the path is not; a trailing slash and
+    the scheme's default port (``:443`` / ``:80``) do not make a new service.
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(str(base_url or "").strip())
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if ":" in host:  # IPv6 literal
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    netloc = host if port in (None, _DEFAULT_PORTS.get(scheme)) else f"{host}:{port}"
+    return f"{scheme}://{netloc}{parts.path.rstrip('/')}"
 
 
 def _read_saved_tokens() -> dict:
+    """The saved tokens, or {} — never read through a symlink (writes refuse one too)."""
+    path = saved_token_path()
+    if path.is_symlink():
+        return {}
     try:
-        data = json.loads(saved_token_path().read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -210,7 +234,17 @@ def save_token(token: str, base_url: str) -> Path:
 
 
 def clear_saved_token(base_url: Optional[str] = None) -> bool:
-    """Forget the token for ``base_url`` (all saved tokens when None). True if any existed."""
+    """Forget the token for ``base_url`` (all saved tokens when None). True if any existed.
+
+    A symlink in place of the token file is never read or written through; clearing
+    everything (``mdf logout``) removes the link itself, not its target.
+    """
+    path = saved_token_path()
+    if path.is_symlink():
+        if base_url is not None:
+            return False
+        os.unlink(path)
+        return True
     tokens = _read_saved_tokens()
     if base_url is None:
         existed = bool(tokens)

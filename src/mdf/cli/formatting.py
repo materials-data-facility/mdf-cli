@@ -130,6 +130,7 @@ def read_client(
 
     from mdf.core import config as core_config
     from mdf.core.backend_client import BackendClient, _api_url_for_service
+    from mdf.core.exceptions import AuthRequired
 
     _hint = "pick one of staging, prod, dev, local — or pass --api-url"
     try:
@@ -168,9 +169,14 @@ def read_client(
         except Exception:
             has_creds = False
     if has_creds:
-        return BackendClient.authenticated(
-            base_url=base, token=token, service_instance=service, dev_user_id=dev_user
-        )
+        try:
+            return BackendClient.authenticated(
+                base_url=base, token=token, service_instance=service, dev_user_id=dev_user
+            )
+        except AuthRequired:
+            # e.g. a cached login that must not go to an untrusted --api-url:
+            # public reads still work anonymously.
+            pass
     return BackendClient(base_url=base)
 
 
@@ -267,6 +273,7 @@ def fail_auth_required(exc: BaseException, *, json_mode: bool) -> None:
     from rich.markup import escape
 
     message, hint, _border = _ERROR_KINDS["auth"]
+    hint = getattr(exc, "hint", None) or hint
     detail = str(exc) if str(exc) and str(exc) != message else None
     if json_mode:
         envelope = error_envelope(kind="auth", message=message, hint=hint)

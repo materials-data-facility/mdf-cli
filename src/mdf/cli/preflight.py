@@ -4,10 +4,9 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from mdf.auth.globus import is_logged_in
 from mdf.core.agent import _extract_doi, _resolve_doi
-from mdf.core.backend_client import BackendClient, _api_url_for_service
-from mdf.core.config import load_saved_token, resolve_service
+from mdf.core.backend_client import BackendClient, _api_url_for_service, credential_source
+from mdf.core.config import resolve_service
 from mdf.core.validation import validate_manifest
 from mdf.models.config import DataSource, ManifestConfig
 
@@ -75,21 +74,13 @@ def auth_ready(
     dev_user: Optional[str] = None,
     api_url: Optional[str] = None,
 ) -> bool:
+    """Is there a credential the publish path would use? (Local check, no network.)"""
     normalized = resolve_service(service).strip().lower()
-    if normalized == "local":
-        return True
-    if token or os.environ.get("MDF_CONNECT_TOKEN"):
-        return True
-    if dev_user or os.environ.get("MDF_DEV_USER_ID"):
-        return True
-    if os.environ.get("MDF_CLIENT_ID") and os.environ.get("MDF_CLIENT_SECRET"):
-        return True
     try:
-        if load_saved_token(api_url or _api_url_for_service(normalized)):
-            return True
-    except ValueError:  # unknown service: no saved token can apply
-        pass
-    return is_logged_in(service_instance=normalized)
+        url = api_url or _api_url_for_service(normalized)
+    except ValueError:  # unknown service
+        return False
+    return credential_source(url, token=token, service_instance=normalized, dev_user_id=dev_user) is not None
 
 
 def resolve_dataset_identifier(raw_id: str, client: Any) -> str:

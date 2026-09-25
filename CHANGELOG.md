@@ -70,6 +70,16 @@
   listing fails, times out, or has no Transfer token.
 
 ### Security
+- A cached Globus login (with its data, transfer and groups tokens) is sent only to the known MDF
+  services and loopback hosts. For any other `--api-url` / `MDF_API_URL` host, pass `--token`,
+  save a token for that URL, or set `MDF_TRUST_API_URL=1`; otherwise the command stops with the
+  `auth` error (exit 4). Public reads fall back to anonymous.
+- Saved tokens are keyed by normalized API URL (scheme/host case-insensitive, default ports and a
+  trailing slash ignored, path case kept). A symlinked token file is never read or written;
+  `mdf logout` removes the link.
+- The Globus data token goes only to the MDF HTTPS host on its default port.
+- `mdf whoami` reports the credential from the same resolution the requests use (env token →
+  client credentials → dev user → cached Globus login → saved token).
 - `mdf clone` sends the Globus data token **only** to the MDF HTTPS host; non-`https` data sources are
   rejected instead of downloaded. Redirects are followed with credentials stripped across hosts.
 

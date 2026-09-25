@@ -135,7 +135,9 @@ mdf doctor                    # Check service, connectivity, login and the local
 ```
 
 A token saved with `--save` is used only for the service (API URL) it was
-validated against, and only when there is no cached Globus login.
+validated against, and only when there is no cached Globus login. A cached
+Globus login is sent only to the known MDF services and to localhost; for any
+other `--api-url`, pass `--token` or set `MDF_TRUST_API_URL=1`.
 
 Commands never start a login prompt unless a person can answer it: with
 `--json`, or when stdin/stdout is not a terminal, a missing login is an `auth`

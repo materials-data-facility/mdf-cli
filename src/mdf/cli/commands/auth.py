@@ -285,25 +285,22 @@ def whoami(
     """Show who you are, on which service, and how you are authenticated."""
     resolved = resolve_service(service)
 
-    from mdf.auth.globus import DEFAULT_TOKEN_PATH, is_logged_in
-    from mdf.core.config import load_saved_token
+    from mdf.auth.globus import DEFAULT_TOKEN_PATH
+    from mdf.core.backend_client import CREDENTIAL_LABELS, credential_source
 
-    cached = is_logged_in(service_instance=resolved)
     env_token = bool(os.environ.get("MDF_CONNECT_TOKEN"))
     env_client = bool(
         os.environ.get("MDF_CLIENT_ID") and os.environ.get("MDF_CLIENT_SECRET")
     )
-
-    if env_client:
-        method = "confidential client (MDF_CLIENT_ID)"
-    elif env_token:
-        method = "environment token (MDF_CONNECT_TOKEN)"
-    elif load_saved_token(api_url or _api_url_for_service(resolved)):
-        method = "saved token (mdf login --token --save)"
-    elif cached:
-        method = "cached Globus login"
-    else:
-        method = None
+    # The same resolution BackendClient.authenticated uses, so the method
+    # reported here is the credential requests actually carry.
+    source = credential_source(
+        api_url or _api_url_for_service(resolved),
+        token=token,
+        service_instance=resolved,
+        dev_user_id=dev_user,
+    )
+    method = CREDENTIAL_LABELS.get(source) if source else None
 
     authenticated = bool(method)
     status_str = "authenticated" if authenticated else "not authenticated"
